@@ -1,5 +1,7 @@
 package raftapi
 
+import "fmt"
+
 // The Raft interface
 type Raft interface {
 	// Start agreement on a new log entry, and return the log index
@@ -36,4 +38,9 @@ type ApplyMsg struct {
 	Snapshot      []byte
 	SnapshotTerm  int
 	SnapshotIndex int
+}
+
+func (applyMsg ApplyMsg) String() string {
+	return fmt.Sprintf("ApplyMsg: CommandValid: %t, Command: %d, CommandIndex: %d, SnapshotValid: %t, SnapshotTerm: %d, SnapshotIndex: %d",
+		applyMsg.CommandValid, applyMsg.Command, applyMsg.CommandIndex, applyMsg.SnapshotValid, applyMsg.SnapshotTerm, applyMsg.SnapshotIndex)
 }
