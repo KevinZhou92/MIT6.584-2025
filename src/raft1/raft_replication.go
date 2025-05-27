@@ -104,6 +104,11 @@ func (rf *Raft) runApplier() {
 
 		// Prepare committed log entries to apply
 		for curIndex := rf.logState.lastAppliedIndex + 1; curIndex <= rf.logState.commitIndex; curIndex++ {
+			if rf.killed() {
+				rf.mu.Unlock()
+				return
+			}
+
 			realIndex := rf.getRealIndex(curIndex)
 			if realIndex < 0 || realIndex >= len(rf.logs) {
 				Debug(dError, "Server %d can't get index %d from log, log size %d", rf.me, curIndex, len(rf.logs))
@@ -178,7 +183,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		}
 
 		if nextIndex >= rf.getLogSizeWithSnapshotInfo() {
-			Debug(dLeader, "Server %d has no logs to replicate for server %d", rf.me, server)
+			Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -214,6 +219,7 @@ func (rf *Raft) runLogReplicator(server int) {
 			return
 		}
 
+		startTime := time.Now()
 		replyCh := make(chan bool, 1)
 		go func() {
 			ok := rf.sendAppendEntries(server, &appendEntriesArgs, &appendEntriesReply)
@@ -232,6 +238,7 @@ func (rf *Raft) runLogReplicator(server int) {
 			continue
 		}
 
+		Debug(dTimer, "Server %d spent %v ms to get a response from server %d timed out", rf.me, time.Since(startTime).Milliseconds(), server)
 		// Leader is not with the highest term, step down to follower
 		if appendEntriesReply.Term > currentTerm {
 			Debug(dWarn, "Server %d(term: %d, electionState: %v) is not leader anymore cuz there is a peer has a higher term", rf.me, rf.getCurrentTerm(), rf.getElectionState())

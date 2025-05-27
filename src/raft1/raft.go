@@ -126,7 +126,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	term, isLeader := rf.electionState.CurrentTerm, rf.electionState.Role == LEADER
 
-	Debug(dLog, "Server %d(term: %d) is %s and Start() received command %v", rf.me, term, roleMap[rf.electionState.Role], command)
+	// Debug(dLog, "Server %d(term: %d) is %s and Start() received command %v", rf.me, term, roleMap[rf.electionState.Role], command)
 
 	// return immediately if current peer is not leader
 	if !isLeader {

@@ -9,8 +9,7 @@ import (
 	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 const (
@@ -18,7 +17,6 @@ const (
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type rfsrv struct {
 	ts          *Test
@@ -105,6 +103,7 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 			err_msg, prevok := rs.ts.checkLogs(rs.me, m)
 			if m.CommandIndex > 1 && prevok == false {
 				err_msg = fmt.Sprintf("server %v apply out of order %v", rs.me, m.CommandIndex)
+				fmt.Printf("server %v logs %v\n", rs.me, rs.logs)
 			}
 			if err_msg != "" {
 				tester.AnnotateCheckerFailureBeforeExit("apply error", err_msg)
@@ -119,9 +118,12 @@ func (rs *rfsrv) applier(applyCh chan raftapi.ApplyMsg) {
 
 // periodically snapshot raft state
 func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
-	if rs.raft == nil {
+	rs.mu.Lock()
+	rf := rs.raft
+	if rf == nil {
 		return // ???
 	}
+	rs.mu.Unlock()
 
 	for m := range applyCh {
 		err_msg := ""
@@ -152,7 +154,7 @@ func (rs *rfsrv) applierSnap(applyCh chan raftapi.ApplyMsg) {
 				}
 				e.Encode(xlog)
 				start := tester.GetAnnotateTimestamp()
-				rs.raft.Snapshot(m.CommandIndex, w.Bytes())
+				rf.Snapshot(m.CommandIndex, w.Bytes())
 				details := fmt.Sprintf(
 					"snapshot created after applying the command at index %v",
 					m.CommandIndex)
