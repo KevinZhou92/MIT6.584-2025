@@ -89,8 +89,8 @@ func (rf *Raft) election() {
 			// Elected as leader
 			if votes > len(rf.peers)/2 {
 				Debug(dLeader, "Server %d has %d votes with term %d(log size: %d) and is LEADER now!\n", rf.me, votes, currentTerm, rf.getLogSizeWithSnapshotInfo())
-				rf.setState(LEADER, currentTerm, rf.me)
 				rf.initializePeerIndexState()
+				rf.setState(LEADER, currentTerm, rf.me)
 				rf.startLeaderProcesses()
 
 				return

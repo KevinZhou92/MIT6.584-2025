@@ -63,13 +63,6 @@ func (rf *Raft) initializePeerIndexState() {
 	}
 }
 
-func (rf *Raft) getPeerIndexState() PeerIndexState {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
-	return *rf.peerIndexState
-}
-
 func (rf *Raft) getMatchIndexForPeer(server int) int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
