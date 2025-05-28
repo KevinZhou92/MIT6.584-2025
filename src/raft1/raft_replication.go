@@ -182,7 +182,9 @@ func (rf *Raft) runLogReplicator(server int) {
 			continue
 		}
 
-		if nextIndex >= rf.getLogSizeWithSnapshotInfo() {
+		// We should still try to send log if nextIndex == log size, as there could be logs that are not replicated by a newly elected leader
+		// Once a new leader is elected, the nextIndex is always initialized to log size.U
+		if nextIndex > rf.getLogSizeWithSnapshotInfo() {
 			Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
 			time.Sleep(100 * time.Millisecond)
 			continue
