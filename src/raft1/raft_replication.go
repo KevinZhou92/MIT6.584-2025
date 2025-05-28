@@ -168,8 +168,8 @@ func (rf *Raft) runLogReplicator(server int) {
 		currentTerm := rf.getCurrentTerm()
 		// leaderCommitIndex := rf.getServerCommitIndex()
 		leaderCommitIndex := rf.getServerCommitIndex()
-		// nextIndex := min(rf.getLogSize(), rf.getNextIndexForPeer(server))
-		nextIndex := min(rf.getLogSizeWithSnapshotInfo(), rf.getNextIndexForPeer(server))
+		leaderLogSize := rf.getLogSizeWithSnapshotInfo()
+		nextIndex := min(leaderLogSize, rf.getNextIndexForPeer(server))
 		prevLogIndex := nextIndex - 1
 
 		// prevLog, err := rf.getLogEntry(prevLogIndex)
@@ -177,14 +177,14 @@ func (rf *Raft) runLogReplicator(server int) {
 		prevLogTerm := prevLog.Term
 		if err != nil {
 			Debug(dError, "Server %d has less logs for server %d, log size: %d, prevLogIndex: %d, reduce nextIndex to %d [thread: %d]",
-				rf.me, server, rf.getLogSize(), prevLogIndex, rf.getSnapshotState().LastIncludedIndex+1, server)
+				rf.me, server, rf.getLogSize(), prevLogIndex, snapshotState.LastIncludedIndex+1, server)
 			rf.installSnapshot(server)
 			continue
 		}
 
 		// We should still try to send log if nextIndex == log size, as there could be logs that are not replicated by a newly elected leader
 		// Once a new leader is elected, the nextIndex is always initialized to log size.U
-		if nextIndex > rf.getLogSizeWithSnapshotInfo() {
+		if nextIndex >= leaderLogSize {
 			Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -193,8 +193,8 @@ func (rf *Raft) runLogReplicator(server int) {
 		// logEntries, err := rf.getLogEntriesFromIndex(nextIndex)
 		logEntries, err := rf.getLogEntriesFromIndexWithSnapshotInfo(nextIndex)
 		if err != nil {
-			Debug(dError, "Server %d has less logs for server %d, log size: %d, reduce nextIndex to %d [thread: %d]", rf.me, server, rf.getLogSize(), rf.getLogSizeWithSnapshotInfo(), server)
-			rf.setNextIndexForPeer(server, rf.getLogSizeWithSnapshotInfo())
+			Debug(dError, "Server %d has less logs for server %d, log size: %d, reduce nextIndex to %d [thread: %d]", rf.me, server, rf.getLogSize(), leaderLogSize, server)
+			rf.setNextIndexForPeer(server, leaderLogSize)
 			continue
 		}
 
@@ -243,7 +243,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		Debug(dTimer, "Server %d spent %v ms to get a response from server %d timed out", rf.me, time.Since(startTime).Milliseconds(), server)
 		// Leader is not with the highest term, step down to follower
 		if appendEntriesReply.Term > currentTerm {
-			Debug(dWarn, "Server %d(term: %d, electionState: %v) is not leader anymore cuz there is a peer has a higher term", rf.me, rf.getCurrentTerm(), rf.getElectionState())
+			Debug(dWarn, "Server %d(term: %d, electionState: %v) is not leader anymore cuz there is a peer has a higher term", rf.me, currentTerm, rf.getElectionState())
 			rf.setState(FOLLOWER, appendEntriesReply.Term, -1)
 			continue
 		}
@@ -253,7 +253,7 @@ func (rf *Raft) runLogReplicator(server int) {
 			Debug(dWarn, "Server %d couldn't replicate log to server %d, response %v", rf.me, server, appendEntriesReply)
 			if appendEntriesReply.ConflictEntryTerm != -1 {
 				conflictEntryIndex, conflictEntryTerm := appendEntriesReply.ConflictEntryIndex, appendEntriesReply.ConflictEntryTerm
-				curIdx := rf.getLogSizeWithSnapshotInfo() - 1
+				curIdx := leaderLogSize - 1
 				for curIdx >= 0 {
 					entry, err := rf.getLogEntryWithSnapshotInfo(curIdx)
 					if err != nil {
