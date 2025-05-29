@@ -58,7 +58,7 @@ func (rf *Raft) getElectionState() ElectionState {
 	return *rf.electionState
 }
 
-func (rf *Raft) setState(role Role, term int, votedFor int) {
+func (rf *Raft) setElectionState(role Role, term int, votedFor int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -66,4 +66,16 @@ func (rf *Raft) setState(role Role, term int, votedFor int) {
 	rf.electionState.CurrentTerm = term
 	rf.electionState.VotedFor = votedFor
 	rf.persist()
+}
+
+func (rf *Raft) becomeCandidate() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer rf.persist()
+
+	rf.electionState.CurrentTerm += 1
+	rf.electionState.Role = CANDIDATE
+	rf.electionState.VotedFor = rf.me
+
+	Debug(dVote, "Server %d became candidate for term %d", rf.me, rf.electionState.CurrentTerm)
 }

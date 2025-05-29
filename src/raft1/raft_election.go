@@ -82,7 +82,7 @@ func (rf *Raft) election() {
 			// Found a peer with a greater term, this peer can't become the leader anymore, stop the leader election
 			if reply.Term > currentTerm {
 				Debug(dVote, "Server %d's term %d is lower than peer's term %d", rf.me, currentTerm, reply.Term)
-				rf.setState(FOLLOWER, reply.Term, -1)
+				rf.setElectionState(FOLLOWER, reply.Term, -1)
 				return
 			}
 			collected += 1
@@ -90,7 +90,7 @@ func (rf *Raft) election() {
 			if votes > len(rf.peers)/2 {
 				Debug(dLeader, "Server %d has %d votes with term %d(log size: %d) and is LEADER now!\n", rf.me, votes, currentTerm, rf.getLogSizeWithSnapshotInfo())
 				rf.initializePeerIndexState()
-				rf.setState(LEADER, currentTerm, rf.me)
+				rf.setElectionState(LEADER, currentTerm, rf.me)
 				rf.startLeaderProcesses()
 
 				return
@@ -111,7 +111,7 @@ func (rf *Raft) startLeaderProcesses() {
 		// append a no-op entry at the beginnin of leader term, to make sure we can rely on
 		// this message to commit entry in a reconnected server, so that all servers can catch up
 		// Basically, this is a fake client write to froce all the peers to get to an agreement
-		go rf.sendAppendEntries(server, rf.buildHeartBeatArgs(), &AppendEntriesReply{})
+		go rf.sendAppendEntries(server, rf.buildHeartBeatArgs(server), &AppendEntriesReply{})
 		go rf.runLogReplicator(server)
 	}
 
@@ -124,6 +124,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// we should not update lastCommtime if someone is requesting for vote, otherwise we could let the unqualified
 	// peer keep requesting for vote
@@ -144,7 +145,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.electionState.CurrentTerm = requestTerm
 		rf.electionState.Role = FOLLOWER
 		rf.electionState.VotedFor = -1
-		rf.persist()
 	}
 
 	// if lastLogTerm < rf.logs[len(rf.logs)-1].Term || (lastLogTerm == rf.logs[len(rf.logs)-1].Term && lastLogIndex < absoluteIndex) {
@@ -156,13 +156,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// vote for requester
 	if rf.electionState.VotedFor == -1 || rf.electionState.VotedFor == candidateId {
-		// Reset last comm time if current peer just voted for a candiat
+		// Reset last comm time if current peer just voted for a candidate
 		rf.lastCommTime = time.Now()
 		rf.electionState.VotedFor = candidateId
 		rf.electionState.CurrentTerm = requestTerm
 		reply.VoteGranted = true
 		reply.Term = requestTerm
-		rf.persist()
 		Debug(dVote, "Server %d votedFor server %d, electionState: %v\n", rf.me, candidateId, rf.electionState)
 		return
 	}

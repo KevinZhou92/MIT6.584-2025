@@ -91,11 +91,6 @@ func (rf *Raft) runApplier() {
 			rf.applyCond.Wait()
 		}
 
-		if rf.killed() {
-			rf.mu.Unlock()
-			return
-		}
-
 		// Prepare snapshot to apply
 		if rf.pendingSnapshotApplyMsg != nil {
 			snapshotMsg = rf.pendingSnapshotApplyMsg
@@ -104,11 +99,6 @@ func (rf *Raft) runApplier() {
 
 		// Prepare committed log entries to apply
 		for curIndex := rf.logState.lastAppliedIndex + 1; curIndex <= rf.logState.commitIndex; curIndex++ {
-			if rf.killed() {
-				rf.mu.Unlock()
-				return
-			}
-
 			realIndex := rf.getRealIndex(curIndex)
 			if realIndex < 0 || realIndex >= len(rf.logs) {
 				Debug(dError, "Server %d can't get index %d from log, log size %d", rf.me, curIndex, len(rf.logs))
@@ -135,13 +125,13 @@ func (rf *Raft) runApplier() {
 		// Apply snapshot (outside lock)
 		if snapshotMsg != nil {
 			Debug(dSnap, "Server %d sent snapshot applyMsg %v", rf.me, snapshotMsg)
-			rf.applyCh <- *snapshotMsg
+			rf.sendApplyMsg(*snapshotMsg)
 		}
 
 		// Apply log entries (outside lock)
 		for _, msg := range entriesToApply {
 			Debug(dCommit, "Server %d sent applyMsg %s", rf.me, msg)
-			rf.applyCh <- msg
+			rf.sendApplyMsg(msg)
 		}
 		Debug(dCommit, "Server %d logState: %v", rf.me, rf.getLogState())
 	}
@@ -244,42 +234,13 @@ func (rf *Raft) runLogReplicator(server int) {
 		// Leader is not with the highest term, step down to follower
 		if appendEntriesReply.Term > currentTerm {
 			Debug(dWarn, "Server %d(term: %d, electionState: %v) is not leader anymore cuz there is a peer has a higher term", rf.me, currentTerm, rf.getElectionState())
-			rf.setState(FOLLOWER, appendEntriesReply.Term, -1)
+			rf.setElectionState(FOLLOWER, appendEntriesReply.Term, -1)
 			continue
 		}
 
 		// Couldn't replicate message, log mismatch found from peer, reduce nextIndex and retry
 		if !appendEntriesReply.Success {
-			Debug(dWarn, "Server %d couldn't replicate log to server %d, response %v", rf.me, server, appendEntriesReply)
-			if appendEntriesReply.ConflictEntryTerm != -1 {
-				conflictEntryIndex, conflictEntryTerm := appendEntriesReply.ConflictEntryIndex, appendEntriesReply.ConflictEntryTerm
-				curIdx := leaderLogSize - 1
-				for curIdx >= 0 {
-					entry, err := rf.getLogEntryWithSnapshotInfo(curIdx)
-					if err != nil {
-						// Defensive fallback: log entry unexpectedly not found
-						Debug(dError, "Server %d failed to get log entry at index %d: %v", rf.me, curIdx, err)
-						break
-					}
-					if entry.Term == conflictEntryTerm {
-						break
-					}
-					curIdx -= 1
-				}
-
-				if curIdx >= 0 {
-					rf.setNextIndexForPeer(server, curIdx+1)
-				} else {
-					rf.setNextIndexForPeer(server, conflictEntryIndex)
-				}
-			} else {
-				rf.setNextIndexForPeer(server, nextIndex-1)
-			}
-
-			if rf.getNextIndexForPeer(server) >= appendEntriesReply.PeerLogSize {
-				rf.setNextIndexForPeer(server, appendEntriesReply.PeerLogSize)
-			}
-			Debug(dWarn, "Server %d couldn't replicate log to server %d, reduce nextIndex to %d", rf.me, server, rf.getNextIndexForPeer(server))
+			rf.handleUnsuccessfulAppend(leaderLogSize, nextIndex, server, appendEntriesReply)
 			prevSuccess = false
 			continue
 		}
@@ -293,6 +254,39 @@ func (rf *Raft) runLogReplicator(server int) {
 	}
 }
 
+func (rf *Raft) handleUnsuccessfulAppend(leaderLogSize int, nextIndex, server int, appendEntriesReply AppendEntriesReply) {
+	Debug(dWarn, "Server %d couldn't replicate log to server %d, response %v", rf.me, server, appendEntriesReply)
+	if appendEntriesReply.ConflictEntryTerm != -1 {
+		conflictEntryIndex, conflictEntryTerm := appendEntriesReply.ConflictEntryIndex, appendEntriesReply.ConflictEntryTerm
+		curIdx := leaderLogSize - 1
+		for curIdx >= 0 {
+			entry, err := rf.getLogEntryWithSnapshotInfo(curIdx)
+			if err != nil {
+				// Defensive fallback: log entry unexpectedly not found
+				Debug(dError, "Server %d failed to get log entry at index %d: %v", rf.me, curIdx, err)
+				break
+			}
+			if entry.Term == conflictEntryTerm {
+				break
+			}
+			curIdx -= 1
+		}
+
+		if curIdx >= 0 {
+			rf.setNextIndexForPeer(server, curIdx+1)
+		} else {
+			rf.setNextIndexForPeer(server, conflictEntryIndex)
+		}
+	} else {
+		rf.setNextIndexForPeer(server, nextIndex-1)
+	}
+
+	if rf.getNextIndexForPeer(server) >= appendEntriesReply.PeerLogSize {
+		rf.setNextIndexForPeer(server, appendEntriesReply.PeerLogSize)
+	}
+	Debug(dWarn, "Server %d couldn't replicate log to server %d, reduce nextIndex to %d", rf.me, server, rf.getNextIndexForPeer(server))
+}
+
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 
@@ -303,6 +297,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 
 	// could be a heartbeat message from a leader
 	if len(args.Entries) == 0 {
@@ -344,129 +339,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.electionState.VotedFor = -1
 		rf.electionState.Role = FOLLOWER
 		rf.electionState.CurrentTerm = args.Term
-		rf.persist()
 	}
 
 	// only update the last communication time if we received a heartbeat from a current leader(which carries a term which is at least larger than peer's)
 	rf.lastCommTime = time.Now()
+
+	// prev log index is pointing to an entry that exist in snapshot and is not the last entry in the snapshot
+	if !rf.hasSamePrevLog(realPrevLogIndex, prevLogTermFromLeader, reply) {
+		return
+	}
+
 	if len(entries) != 0 {
-		// prev log index is pointing to an entry that exist in snapshot and is not the last entry in the snapshot
-		if realPrevLogIndex < -1 {
-			Debug(dWarn, "Server %d's has log size: %d, realPrevLogIndex %d, server snapshotState %v\n", rf.me, len(rf.logs), realPrevLogIndex, rf.snapshotState)
-			// let server back down for one index
-			reply.ConflictEntryIndex = rf.snapshotState.LastIncludedIndex
-			reply.ConflictEntryTerm = rf.snapshotState.LastIncludedTerm
-			return
-		}
-
-		if realPrevLogIndex >= len(rf.logs) {
-			Debug(dWarn, "Server %d's has log size: %d, realPrevLogIndex %d\n", rf.me, len(rf.logs), realPrevLogIndex)
-			reply.ConflictEntryIndex = len(rf.logs) + rf.snapshotState.LastIncludedIndex
-			reply.ConflictEntryTerm = rf.snapshotState.LastIncludedTerm
-			if len(rf.logs) != 0 {
-				reply.ConflictEntryTerm = rf.logs[len(rf.logs)-1].Term
-			}
-			return
-		}
-
-		// reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
-		var prevLogTermOnServer int
-		// prevLogIndex is the same as lastIncludedIndex
-		if realPrevLogIndex == -1 {
-			prevLogTermOnServer = rf.snapshotState.LastIncludedTerm
-		} else {
-			prevLogTermOnServer = rf.logs[realPrevLogIndex].Term
-		}
-
-		if realPrevLogIndex >= 0 && prevLogTermOnServer != prevLogTermFromLeader {
-			Debug(dWarn, "Server %d's term at prevLogIndex %d doesn't match prevLogTerm %d\n", rf.me, realPrevLogIndex, prevLogTermFromLeader)
-			index := realPrevLogIndex
-			for index < len(rf.logs) && index > 0 && rf.logs[index].Term != prevLogTermFromLeader {
-				index -= 1
-			}
-
-			if 0 <= index && index+1 < len(rf.logs) {
-				reply.ConflictEntryIndex = index + 1
-				reply.ConflictEntryTerm = rf.logs[index+1].Term
-			}
-
-			return
-		}
-
-		//
-		//    Log truncate and append
-		//
-		// Truncate log if prevLogIndex is not the last log in current peer's log.This could happen during a split brain scenario.
-		// Note that we should not truncte committed log as once log is committed it it durable
-		Debug(dLog, "Server %d received log entries %s\n", rf.me, args)
-		// we might need to truncate log if there is any mistmatch for log entry at the same index
-		// Don't just blindly truncate like rf.logs = rf.logs[:realPrevLogIndex+1] as an out of order message could incorrectly truncate
-		// message
-		// we should not change committed entry, we should only check entries that are not committed
-		if realPrevLogIndex+1 <= len(rf.logs) {
-			Debug(dPersist, "Server %d log length before append: %d", rf.me, len(rf.logs))
-			misMatchIndex := -1
-			entryIndex := 0
-			for idx := realPrevLogIndex + 1; idx < len(rf.logs) && entryIndex < len(entries); idx += 1 {
-				if rf.logs[idx].Term != entries[idx-realPrevLogIndex-1].Term {
-					misMatchIndex = idx
-					break
-				}
-				entryIndex += 1
-			}
-
-			if misMatchIndex != -1 {
-				rf.logs = rf.logs[:misMatchIndex]
-				Debug(dLog, "Server %d truncated its log to index %d", rf.me, misMatchIndex)
-			}
-		}
-
-		// If there were retries for a request, we just do an idempotenet operation here, we are put the entry
-		// at the same index it was supposed to be at. For example, if prevLogIndex was 5, then the first entry in the
-		// input should be at index 6. Note that we already made sure the prevLogTerm matches with the log entry's term
-		// at prevLogIndex
-		idx := realPrevLogIndex + 1
-		for idx < len(rf.logs) && idx-realPrevLogIndex-1 < len(entries) {
-			rf.logs[idx] = entries[idx-realPrevLogIndex-1]
-			idx += 1
-		}
-		// append new logs
-		if idx-realPrevLogIndex-1 < len(entries) {
-			rf.logs = append(rf.logs, entries[idx-realPrevLogIndex-1:]...)
-		}
-
-		Debug(dPersist, "Server %d log length after append: %d", rf.me, len(rf.logs))
-		Debug(dLog, "Server %d append entries in log\n", rf.me)
+		rf.truncateAndAppendLogs(realPrevLogIndex, entries)
 	}
 
 	// Debug(dWarn, "Server %d's commitIndex %d is behind leader %d's commitIndex %d, server log count: %d\n", rf.me, rf.logState.commitIndex, args.LeaderId, leaderCommitIndex, len(rf.logs))
 	// This check should happen after any potential log truncate that will happen during an appentry behavior
 	// Otherwise we could end up mistakenly updating commit index on current peer
 	if leaderCommitIndex > rf.logState.commitIndex {
-		Debug(dWarn, "Server %d's commitIndex %d is behind leader %d's commitIndex %d, server log count: %d, server last includedIndex %d, virtual log index %d\n",
-			rf.me, rf.logState.commitIndex, args.LeaderId, leaderCommitIndex, len(rf.logs), rf.snapshotState.LastIncludedIndex, len(rf.logs)+rf.snapshotState.LastIncludedIndex)
-		newCommitIndex := rf.logState.commitIndex
-		// Find last new entry from current term, we should only commit the entry that belongs to current term
-		// For example,
-		// The original leader (Term 2) appends a log entry at index 4, but it fails to replicate it to a majority of followers.
-		// The original leader crashes or gets partitioned.
-		// The remaining two followers elect a new leader (Term 3).
-		// The new leader writes a new log entry at index 4 (with Term 3), effectively overwriting the uncommitted entry from the old leader.
-		// The new leader commits up to index 4 after successfully replicating it to a majority.
-		// The old leader rejoins the cluster and steps down as a follower. It receives an AppendEntries RPC(heartbeat) from the new leader with commitIndex = 4.
-		// The old leader blindly sets its commit index to 4, without checking whether its log at index 4 matches the leader’s log term (Term 3).
-		// As a result, the old leader incorrectly considers its own log at index 4 (Term 2) as committed, violating Raft’s safety property.
-		// So we should just commit entry from current term
-		for i := rf.logState.commitIndex + 1; i <= min(leaderCommitIndex, len(rf.logs)+rf.snapshotState.LastIncludedIndex); i++ {
-			if rf.logs[i-rf.snapshotState.LastIncludedIndex-1].Term != rf.electionState.CurrentTerm {
-				continue
-			}
-			newCommitIndex = i
-		}
-		rf.logState.commitIndex = newCommitIndex
-		Debug(dWarn, "Server %d's commitIndex %d, lastAppliedIndex %d, server snapshotState %v, logSize: %d",
-			rf.me, rf.logState.commitIndex, rf.logState.lastAppliedIndex, rf.snapshotState, len(rf.logs))
-		rf.applyCond.Signal()
+		rf.updateCommitId(args)
 	}
 
 	if len(rf.logs) == 0 {
@@ -474,10 +365,56 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		Debug(dLog, "Server %d log size: %d lastLogTerm: %d, logs: %v\n", rf.me, len(rf.logs), rf.logs[len(rf.logs)-1].Term, rf.logs)
 	}
-	rf.persist()
 
 	reply.Term = rf.electionState.CurrentTerm
 	reply.Success = true
+}
+
+func (rf *Raft) truncateAndAppendLogs(realPrevLogIndex int, entries []LogEntry) {
+	//
+	//    Log truncate and append
+	//
+	// Truncate log if prevLogIndex is not the last log in current peer's log.This could happen during a split brain scenario.
+	// Note that we should not truncte committed log as once log is committed it it durable
+	Debug(dLog, "Server %d received log entries %s\n", rf.me, entries)
+	// we might need to truncate log if there is any mistmatch for log entry at the same index
+	// Don't just blindly truncate like rf.logs = rf.logs[:realPrevLogIndex+1] as an out of order message could incorrectly truncate
+	// message
+	// we should not change committed entry, we should only check entries that are not committed
+	if realPrevLogIndex+1 <= len(rf.logs) {
+		Debug(dPersist, "Server %d log length before append: %d", rf.me, len(rf.logs))
+		misMatchIndex := -1
+		entryIndex := 0
+		for idx := realPrevLogIndex + 1; idx < len(rf.logs) && entryIndex < len(entries); idx += 1 {
+			if rf.logs[idx].Term != entries[idx-realPrevLogIndex-1].Term {
+				misMatchIndex = idx
+				break
+			}
+			entryIndex += 1
+		}
+
+		if misMatchIndex != -1 {
+			rf.logs = rf.logs[:misMatchIndex]
+			Debug(dLog, "Server %d truncated its log to index %d", rf.me, misMatchIndex)
+		}
+	}
+
+	// If there were retries for a request, we just do an idempotenet operation here, we are put the entry
+	// at the same index it was supposed to be at. For example, if prevLogIndex was 5, then the first entry in the
+	// input should be at index 6. Note that we already made sure the prevLogTerm matches with the log entry's term
+	// at prevLogIndex
+	idx := realPrevLogIndex + 1
+	for idx < len(rf.logs) && idx-realPrevLogIndex-1 < len(entries) {
+		rf.logs[idx] = entries[idx-realPrevLogIndex-1]
+		idx += 1
+	}
+	// append new logs
+	if idx-realPrevLogIndex-1 < len(entries) {
+		rf.logs = append(rf.logs, entries[idx-realPrevLogIndex-1:]...)
+	}
+
+	Debug(dPersist, "Server %d log length after append: %d", rf.me, len(rf.logs))
+	Debug(dLog, "Server %d append entries in log\n", rf.me)
 }
 
 func (rf *Raft) appendLogLocally(logEntry LogEntry) int {
@@ -489,4 +426,85 @@ func (rf *Raft) appendLogLocally(logEntry LogEntry) int {
 	Debug(dLog, "Server %d appended log %v and has log size %d", rf.me, logEntry, len(rf.logs))
 
 	return len(rf.logs) + rf.snapshotState.LastIncludedIndex
+}
+
+func (rf *Raft) updateCommitId(args *AppendEntriesArgs) {
+	leaderId, leaderCommitIndex := args.LeaderId, args.LeaderCommit
+	Debug(dWarn, "Server %d's commitIndex %d is behind leader %d's commitIndex %d, server log count: %d, server last includedIndex %d, virtual log index %d\n",
+		rf.me, rf.logState.commitIndex, leaderId, leaderCommitIndex, len(rf.logs), rf.snapshotState.LastIncludedIndex, len(rf.logs)+rf.snapshotState.LastIncludedIndex)
+	newCommitIndex := rf.logState.commitIndex
+	// Find last new entry from current term, we should only commit the entry that belongs to current term
+	// For example,
+	// The original leader (Term 2) appends a log entry at index 4, but it fails to replicate it to a majority of followers.
+	// The original leader crashes or gets partitioned.
+	// The remaining two followers elect a new leader (Term 3).
+	// The new leader writes a new log entry at index 4 (with Term 3), effectively overwriting the uncommitted entry from the old leader.
+	// The new leader commits up to index 4 after successfully replicating it to a majority.
+	// The old leader rejoins the cluster and steps down as a follower. It receives an AppendEntries RPC(heartbeat) from the new leader with commitIndex = 4.
+	// The old leader blindly sets its commit index to 4, without checking whether its log at index 4 matches the leader’s log term (Term 3).
+	// As a result, the old leader incorrectly considers its own log at index 4 (Term 2) as committed, violating Raft’s safety property.
+	// So we should just commit entry from current term
+	for i := rf.logState.commitIndex + 1; i <= min(leaderCommitIndex, len(rf.logs)+rf.snapshotState.LastIncludedIndex); i++ {
+		if rf.logs[i-rf.snapshotState.LastIncludedIndex-1].Term != rf.electionState.CurrentTerm {
+			continue
+		}
+		newCommitIndex = i
+	}
+	rf.logState.commitIndex = newCommitIndex
+	Debug(dWarn, "Server %d's commitIndex %d, lastAppliedIndex %d, server snapshotState %v, logSize: %d",
+		rf.me, rf.logState.commitIndex, rf.logState.lastAppliedIndex, rf.snapshotState, len(rf.logs))
+	rf.applyCond.Signal()
+}
+
+func (rf *Raft) hasSamePrevLog(realPrevLogIndex int, prevLogTermFromLeader int, reply *AppendEntriesReply) bool {
+	if realPrevLogIndex < -1 {
+		Debug(dWarn, "Server %d's has log size: %d, realPrevLogIndex %d, server snapshotState %v\n", rf.me, len(rf.logs), realPrevLogIndex, rf.snapshotState)
+		// let server back down for one index
+		reply.ConflictEntryIndex = rf.snapshotState.LastIncludedIndex
+		reply.ConflictEntryTerm = rf.snapshotState.LastIncludedTerm
+		return false
+	}
+
+	if realPrevLogIndex >= len(rf.logs) {
+		Debug(dWarn, "Server %d's has log size: %d, realPrevLogIndex %d\n", rf.me, len(rf.logs), realPrevLogIndex)
+		reply.ConflictEntryIndex = len(rf.logs) + rf.snapshotState.LastIncludedIndex
+		reply.ConflictEntryTerm = rf.snapshotState.LastIncludedTerm
+		if len(rf.logs) != 0 {
+			reply.ConflictEntryTerm = rf.logs[len(rf.logs)-1].Term
+		}
+		return false
+	}
+
+	// reply false if log doesn't contain an entry at prevLogIndex whose term matches prevLogTerm
+	var prevLogTermOnServer int
+	// prevLogIndex is the same as lastIncludedIndex
+	if realPrevLogIndex == -1 {
+		prevLogTermOnServer = rf.snapshotState.LastIncludedTerm
+	} else {
+		prevLogTermOnServer = rf.logs[realPrevLogIndex].Term
+	}
+
+	if realPrevLogIndex >= 0 && prevLogTermOnServer != prevLogTermFromLeader {
+		Debug(dWarn, "Server %d's term at prevLogIndex %d doesn't match prevLogTerm %d\n", rf.me, realPrevLogIndex, prevLogTermFromLeader)
+		index := realPrevLogIndex
+		for index < len(rf.logs) && index > 0 && rf.logs[index].Term != prevLogTermFromLeader {
+			index -= 1
+		}
+
+		if 0 <= index && index+1 < len(rf.logs) {
+			reply.ConflictEntryIndex = index + 1
+			reply.ConflictEntryTerm = rf.logs[index+1].Term
+		}
+
+		return false
+	}
+
+	return true
+}
+
+func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg) {
+	if rf.killed() {
+		return
+	}
+	rf.applyCh <- applyMsg
 }
