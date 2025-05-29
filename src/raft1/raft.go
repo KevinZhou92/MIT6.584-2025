@@ -169,7 +169,7 @@ func (rf *Raft) ticker() {
 		// Debug(dTerm, "Server %d term is %d", rf.me, rf.state.currentTerm)
 		if rf.shoudStartElection(timeout) {
 			// increment term and start a new election
-			rf.setState(CANDIDATE, rf.getCurrentTerm()+1, rf.me)
+			rf.becomeCandidate()
 			rf.election()
 		}
 	}
@@ -200,7 +200,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	// A peer would always starts as a follower
-	rf.setState(FOLLOWER, rf.getCurrentTerm(), -1)
+	rf.setElectionState(FOLLOWER, rf.getCurrentTerm(), -1)
 
 	rf.logState = &LogState{max(rf.snapshotState.LastIncludedIndex, 0), max(rf.snapshotState.LastIncludedIndex, 0)}
 	Debug(dInfo, "Server %d started with electionState: %v, logs: %v, snapshotState: %v", rf.me, rf.electionState, rf.logs, rf.snapshotState)

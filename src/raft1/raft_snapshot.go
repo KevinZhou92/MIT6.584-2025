@@ -83,7 +83,7 @@ func (rf *Raft) installSnapshot(server int) {
 	// Leader is not with the highest term, step down to follower
 	if replyTerm > rf.getCurrentTerm() {
 		Debug(dSnap, "Server %d is not leader anymore cuz there is a peer has a higher term", rf.me)
-		rf.setState(FOLLOWER, replyTerm, -1)
+		rf.setElectionState(FOLLOWER, replyTerm, -1)
 	}
 	// Update next index and match index after installing the snapshot
 	rf.setNextIndexForPeer(server, installSnapShotArgs.LastIncludedIndex+1)
