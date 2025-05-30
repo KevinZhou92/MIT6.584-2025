@@ -128,7 +128,15 @@ func (rf *Raft) InstallSnapShot(args *InstallSnapShotArgs, reply *InstallSnapSho
 
 	if lastIncludedIndex > rf.logState.lastAppliedIndex {
 		Debug(dSnap, "Server %d will advance lastAppliedIndex according to snapshot request: %v. Logstate: %v", rf.me, args, rf.logState)
-		rf.pendingSnapshotApplyMsg = &raftapi.ApplyMsg{false, -1, -1, true, data, lastIncludedIndexTerm, lastIncludedIndex}
+		rf.pendingSnapshotApplyMsg = &raftapi.ApplyMsg{
+			CommandValid:  false,
+			Command:       -1,
+			CommandIndex:  -1,
+			SnapshotValid: true,
+			Snapshot:      data,
+			SnapshotTerm:  lastIncludedIndexTerm,
+			SnapshotIndex: lastIncludedIndex}
+
 		rf.logState.lastAppliedIndex = lastIncludedIndex
 		rf.logState.commitIndex = max(rf.logState.commitIndex, lastIncludedIndex)
 		Debug(dSnap, "Server %d update logState %s with last included index %d", rf.me, rf.logState, lastIncludedIndex)

@@ -7,6 +7,8 @@ import (
 	"6.5840/raftapi"
 )
 
+const HEARBEAT_INTERVAL_IN_MILLIS int = 50
+
 type LogEntry struct {
 	Term    int
 	Command interface{}
@@ -47,6 +49,7 @@ func (args AppendEntriesReply) String() string {
 }
 
 func (rf *Raft) runReplicaCounter() {
+	Debug(dInfo, "Server %d start replica count process", rf.me)
 	for !rf.killed() {
 		if _, isLeader := rf.getLeaderInfo(); !isLeader {
 			return
@@ -156,15 +159,21 @@ func (rf *Raft) runLogReplicator(server int) {
 		}
 
 		currentTerm := rf.getCurrentTerm()
-		// leaderCommitIndex := rf.getServerCommitIndex()
 		leaderCommitIndex := rf.getServerCommitIndex()
 		leaderLogSize := rf.getLogSizeWithSnapshotInfo()
 		nextIndex := min(leaderLogSize, rf.getNextIndexForPeer(server))
 		prevLogIndex := nextIndex - 1
 
-		// prevLog, err := rf.getLogEntry(prevLogIndex)
 		prevLog, err := rf.getLogEntryWithSnapshotInfo(prevLogIndex)
 		prevLogTerm := prevLog.Term
+
+		// Stop log replicator if current peer is not leader anymore. We should do this after we generate the parameters for appendEntries
+		// If we generate the args after checking the current peer is a leader, we could mistakenly send appendEntries when the peer turns to follower just after leader
+		if _, isLeader := rf.getLeaderInfo(); !isLeader {
+			Debug(dLeader, "Server %d is not leader anymore, will not replicate logs [thread: %d]", rf.me, server)
+			return
+		}
+
 		if err != nil {
 			Debug(dError, "Server %d has less logs for server %d, log size: %d, prevLogIndex: %d, reduce nextIndex to %d [thread: %d]",
 				rf.me, server, rf.getLogSize(), prevLogIndex, snapshotState.LastIncludedIndex+1, server)
@@ -196,21 +205,6 @@ func (rf *Raft) runLogReplicator(server int) {
 		appendEntriesReply := AppendEntriesReply{}
 
 		Debug(dLeader, "Server %d try to replicate log %v to server %d", rf.me, appendEntriesArgs, server)
-		// ok := rf.sendAppendEntries(server, &appendEntriesArgs, &appendEntriesReply)
-		// if !ok {
-		// 	Debug(dLog, "Server %d rpc call to server %d failed, current server role is %s", rf.me, server, roleMap[rf.GetRole()])
-		// 	continue
-		// }
-
-		// Stop log replicator is current peer is not leader anymore, we haver to put this check after we build the appendEntriesArgs request
-		// this way we make sure we only send out request with the corrrect leader information
-		// If we put the check at the beginning then we might generate the appendEntries when the server is not leader anymore, leading
-		// to problems in log replication
-		if _, isLeader := rf.getLeaderInfo(); !isLeader {
-			Debug(dLeader, "Server %d is not leader anymore, will not replicate logs [thread: %d]", rf.me, server)
-			return
-		}
-
 		startTime := time.Now()
 		replyCh := make(chan bool, 1)
 		go func() {
@@ -225,7 +219,7 @@ func (rf *Raft) runLogReplicator(server int) {
 				continue
 			}
 			// Timeout after 1.5 seconds
-		case <-time.After(1500 * time.Millisecond):
+		case <-time.After(500 * time.Millisecond):
 			Debug(dWarn, "Server %d rpc call to server %d timed out", rf.me, server)
 			continue
 		}
@@ -240,7 +234,7 @@ func (rf *Raft) runLogReplicator(server int) {
 
 		// Couldn't replicate message, log mismatch found from peer, reduce nextIndex and retry
 		if !appendEntriesReply.Success {
-			rf.handleUnsuccessfulAppend(leaderLogSize, nextIndex, server, appendEntriesReply)
+			rf.handleUnsuccessfulAppend(leaderLogSize, nextIndex, server, &appendEntriesArgs, &appendEntriesReply)
 			prevSuccess = false
 			continue
 		}
@@ -254,13 +248,22 @@ func (rf *Raft) runLogReplicator(server int) {
 	}
 }
 
-func (rf *Raft) handleUnsuccessfulAppend(leaderLogSize int, nextIndex, server int, appendEntriesReply AppendEntriesReply) {
+func (rf *Raft) handleUnsuccessfulAppend(leaderLogSize int, nextIndex int, server int, appendEntriesArgs *AppendEntriesArgs, appendEntriesReply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	latestNextIndex := rf.peerIndexState.nextIndex[server]
+	if nextIndex != latestNextIndex && len(appendEntriesArgs.Entries) == 0 {
+		// Heartbeat request should take lower privilege on updating next index
+		Debug(dWarn, "Server %d should not change a new prevLogIndx %d to a oldPrevLogIndx %d for server %d", rf.me, latestNextIndex, nextIndex, server)
+		return
+	}
 	Debug(dWarn, "Server %d couldn't replicate log to server %d, response %v", rf.me, server, appendEntriesReply)
 	if appendEntriesReply.ConflictEntryTerm != -1 {
 		conflictEntryIndex, conflictEntryTerm := appendEntriesReply.ConflictEntryIndex, appendEntriesReply.ConflictEntryTerm
 		curIdx := leaderLogSize - 1
 		for curIdx >= 0 {
-			entry, err := rf.getLogEntryWithSnapshotInfo(curIdx)
+			entry, err := rf.getLogEntryWithSnapshotInfoWithoutLock(curIdx)
 			if err != nil {
 				// Defensive fallback: log entry unexpectedly not found
 				Debug(dError, "Server %d failed to get log entry at index %d: %v", rf.me, curIdx, err)
@@ -273,18 +276,18 @@ func (rf *Raft) handleUnsuccessfulAppend(leaderLogSize int, nextIndex, server in
 		}
 
 		if curIdx >= 0 {
-			rf.setNextIndexForPeer(server, curIdx+1)
+			rf.peerIndexState.nextIndex[server] = curIdx + 1
 		} else {
-			rf.setNextIndexForPeer(server, conflictEntryIndex)
+			rf.peerIndexState.nextIndex[server] = conflictEntryIndex
 		}
 	} else {
-		rf.setNextIndexForPeer(server, nextIndex-1)
+		rf.peerIndexState.nextIndex[server] = nextIndex - 1
 	}
 
-	if rf.getNextIndexForPeer(server) >= appendEntriesReply.PeerLogSize {
-		rf.setNextIndexForPeer(server, appendEntriesReply.PeerLogSize)
+	if rf.peerIndexState.nextIndex[server] >= appendEntriesReply.PeerLogSize {
+		rf.peerIndexState.nextIndex[server] = appendEntriesReply.PeerLogSize
 	}
-	Debug(dWarn, "Server %d couldn't replicate log to server %d, reduce nextIndex to %d", rf.me, server, rf.getNextIndexForPeer(server))
+	Debug(dWarn, "Server %d couldn't replicate log to server %d, reduce nextIndex to %d", rf.me, server, rf.peerIndexState.nextIndex[server])
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -376,7 +379,7 @@ func (rf *Raft) truncateAndAppendLogs(realPrevLogIndex int, entries []LogEntry) 
 	//
 	// Truncate log if prevLogIndex is not the last log in current peer's log.This could happen during a split brain scenario.
 	// Note that we should not truncte committed log as once log is committed it it durable
-	Debug(dLog, "Server %d received log entries %s\n", rf.me, entries)
+	Debug(dLog, "Server %d received log entries %v\n", rf.me, entries)
 	// we might need to truncate log if there is any mistmatch for log entry at the same index
 	// Don't just blindly truncate like rf.logs = rf.logs[:realPrevLogIndex+1] as an out of order message could incorrectly truncate
 	// message

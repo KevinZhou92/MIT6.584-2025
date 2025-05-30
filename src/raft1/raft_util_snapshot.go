@@ -9,6 +9,11 @@ func (rf *Raft) getLogEntryWithSnapshotInfo(virtualIndex int) (LogEntry, error) 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
+	return rf.getLogEntryWithSnapshotInfoWithoutLock(virtualIndex)
+}
+
+// volatile state on all servers
+func (rf *Raft) getLogEntryWithSnapshotInfoWithoutLock(virtualIndex int) (LogEntry, error) {
 	realIndex := rf.getRealIndex(virtualIndex)
 
 	if realIndex < -1 || realIndex >= len(rf.logs) {
