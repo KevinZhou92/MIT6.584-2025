@@ -79,3 +79,11 @@ func (rf *Raft) becomeCandidate() {
 
 	Debug(dVote, "Server %d became candidate for term %d", rf.me, rf.electionState.CurrentTerm)
 }
+
+func (rf *Raft) becomeLeader(currentTerm int) {
+	rf.initializePeerIndexState()
+	rf.setElectionState(LEADER, currentTerm, rf.me)
+	rf.startLeaderProcesses()
+
+	Debug(dVote, "Server %d became candidate for term %d", rf.me, rf.electionState.CurrentTerm)
+}
