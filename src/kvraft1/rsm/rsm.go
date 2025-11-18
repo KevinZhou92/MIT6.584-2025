@@ -5,21 +5,27 @@ import (
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
+	"github.com/google/uuid"
 )
 
 var useRaftStateMachine bool // to plug in another raft besided raft1
-
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Me  int
+	Id  string
+	Req any
 }
 
+type Result struct {
+	Id  string
+	Req any
+}
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -41,6 +47,7 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	resChans map[int]chan Result
 }
 
 // servers[] contains the ports of the set of
@@ -64,10 +71,16 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		resChans:     make(map[int]chan Result), // initialize the map, index -> chan
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+
+	go rsm.StartReaderProcess()
+
+	// fmt.Printf("RSM server %d started with %d servers\n", me, len(servers))
+
 	return rsm
 }
 
@@ -75,16 +88,72 @@ func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
 
-
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
 // try again.
 func (rsm *RSM) Submit(req any) (rpc.Err, any) {
+	id := uuid.New().String()
+	op := Op{Me: rsm.me, Id: id, Req: req}
 
-	// Submit creates an Op structure to run a command through Raft;
-	// for example: op := Op{Me: rsm.me, Id: id, Req: req}, where req
-	// is the argument to Submit and id is a unique id for the op.
+	// fmt.Printf("RSM server %d: Submitting op %v\n", rsm.me, op)
+	// index, term, isLeader
+	index, _, isLeader := rsm.Raft().Start(op)
+	if !isLeader {
+		return rpc.ErrWrongLeader, nil
+	}
 
-	// your code here
-	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
+	rsm.mu.Lock()
+	resChan := make(chan Result, 1)
+	if rsm.resChans == nil {
+		rsm.resChans = make(map[int]chan Result)
+	}
+	rsm.resChans[index] = resChan
+	rsm.mu.Unlock()
+
+	// fmt.Println("RSM server ", rsm.me, " submitted op at index ", index)
+	res := <-resChan
+	// fmt.Println("RSM server ", rsm.me, " finished op at index ", index)
+	if res.Id != op.Id {
+		// fmt.Printf("Deleting res chan for op %v", op)
+		// Clean up recev chans as current server is not leader anymore
+		rsm.CleanupRecvChans()
+		return rpc.ErrWrongLeader, nil
+	}
+
+	rsm.mu.Lock()
+	delete(rsm.resChans, index)
+	rsm.mu.Unlock()
+
+	return rpc.OK, res.Req
+}
+
+func (rsm *RSM) StartReaderProcess() {
+	// RSM should exit if the raft instance is killed
+	defer func() {
+		rsm.CleanupRecvChans()
+	}()
+
+	for msg := range rsm.applyCh {
+		index := msg.CommandIndex
+
+		// fmt.Println(rsm.me)
+		// fmt.Println(msg)
+		res := rsm.sm.DoOp(msg.Command.(Op).Req)
+
+		rsm.mu.Lock()
+		if ch, ok := rsm.resChans[index]; ok {
+			ch <- Result{Id: msg.Command.(Op).Id, Req: res}
+		}
+		rsm.mu.Unlock()
+	}
+}
+
+func (rsm *RSM) CleanupRecvChans() {
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+
+	for index, ch := range rsm.resChans {
+		close(ch)
+		delete(rsm.resChans, index)
+	}
 }
