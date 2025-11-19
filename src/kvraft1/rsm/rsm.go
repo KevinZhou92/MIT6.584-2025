@@ -2,6 +2,7 @@ package rsm
 
 import (
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labrpc"
@@ -95,12 +96,12 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	id := uuid.New().String()
 	op := Op{Me: rsm.me, Id: id, Req: req}
 
-	// fmt.Printf("RSM server %d: Submitting op %v\n", rsm.me, op)
 	// index, term, isLeader
 	index, _, isLeader := rsm.Raft().Start(op)
 	if !isLeader {
 		return rpc.ErrWrongLeader, nil
 	}
+	// fmt.Printf("RSM server %d: Submitting op %v\n", rsm.me, op)
 
 	rsm.mu.Lock()
 	resChan := make(chan Result, 1)
@@ -110,29 +111,33 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	rsm.resChans[index] = resChan
 	rsm.mu.Unlock()
 
+	defer func() {
+		rsm.mu.Lock()
+		delete(rsm.resChans, index)
+		rsm.mu.Unlock()
+	}()
+
 	// fmt.Println("RSM server ", rsm.me, " submitted op at index ", index)
-	res := <-resChan
-	// fmt.Println("RSM server ", rsm.me, " finished op at index ", index)
-	if res.Id != op.Id {
-		// fmt.Printf("Deleting res chan for op %v", op)
-		// Clean up recev chans as current server is not leader anymore
-		rsm.CleanupRecvChans()
+
+	select {
+	case res := <-resChan:
+		// fmt.Println("RSM server ", rsm.me, " finished op at index ", index)
+		if res.Id != op.Id {
+			// fmt.Printf("Deleting res chan for op %v", op)
+			// Clean up recev chans as current server is not leader anymore
+			return rpc.ErrWrongLeader, nil
+		} else {
+			return rpc.OK, res.Req
+		}
+	case <-time.After(2000 * time.Millisecond):
+		// fmt.Printf("Timeout waiting for op %v", op)
 		return rpc.ErrWrongLeader, nil
 	}
 
-	rsm.mu.Lock()
-	delete(rsm.resChans, index)
-	rsm.mu.Unlock()
-
-	return rpc.OK, res.Req
 }
 
 func (rsm *RSM) StartReaderProcess() {
 	// RSM should exit if the raft instance is killed
-	defer func() {
-		rsm.CleanupRecvChans()
-	}()
-
 	for msg := range rsm.applyCh {
 		index := msg.CommandIndex
 
@@ -145,15 +150,5 @@ func (rsm *RSM) StartReaderProcess() {
 			ch <- Result{Id: msg.Command.(Op).Id, Req: res}
 		}
 		rsm.mu.Unlock()
-	}
-}
-
-func (rsm *RSM) CleanupRecvChans() {
-	rsm.mu.Lock()
-	defer rsm.mu.Unlock()
-
-	for index, ch := range rsm.resChans {
-		close(ch)
-		delete(rsm.resChans, index)
 	}
 }
