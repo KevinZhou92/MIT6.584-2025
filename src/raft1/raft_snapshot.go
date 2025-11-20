@@ -43,15 +43,15 @@ func (rf *Raft) Snapshot(virtualIndex int, snapshot []byte) {
 	realIndex := rf.getRealIndex(virtualIndex)
 	// Your code here (3D).
 	// Don't truncate log if there are not enough logs yet
-	if len(rf.logs) < 10 || realIndex >= len(rf.logs) {
-		Debug(dSnap, "Server %d doesn't have enough logs, current log size %d", rf.me, len(rf.logs))
+	if len(rf.logs) < 1 || realIndex >= len(rf.logs) || realIndex < 0 {
+		Debug(dSnap, "Server %d doesn't have enough logs, current log size %d, realIndex %d", rf.me, len(rf.logs), realIndex)
 		return
 	}
 
 	newLastIncludedTerm := rf.logs[realIndex].Term
 
 	// truncate log and write snapshot to persister
-	Debug(dSnap, "Server %d truncate logs with log size %d, truncate through index %d", rf.me, len(rf.logs), realIndex)
+	Debug(dSnap, "Server %d truncate logs with log size %d, truncate with virtualIndex %d, and realIndex %d", rf.me, len(rf.logs), virtualIndex, realIndex)
 
 	newLogs := append([]LogEntry{}, rf.logs[realIndex+1:]...)
 	rf.snapshotState = &SnapshotState{virtualIndex, newLastIncludedTerm}
@@ -65,7 +65,7 @@ func (rf *Raft) Snapshot(virtualIndex int, snapshot []byte) {
 	raftstate := w.Bytes()
 
 	rf.persister.Save(raftstate, snapshot)
-	Debug(dSnap, "Server %d truncate through absolute index %d, snapshotstate: %v, server now has %d logs", rf.me, realIndex, rf.snapshotState, len(newLogs))
+	Debug(dSnap, "Server %d truncate through virtualIndex %d, realIndex %d, snapshotstate: %v, server now has %d logs", rf.me, virtualIndex, realIndex, rf.snapshotState, len(newLogs))
 }
 
 func (rf *Raft) installSnapshot(server int) {

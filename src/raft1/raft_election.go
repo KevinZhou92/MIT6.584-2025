@@ -54,6 +54,7 @@ func (rf *Raft) election() {
 	ms := 300 + (rand.Int63() % 200)
 	deadline := time.After(time.Duration(ms) * time.Millisecond)
 
+	startTime := time.Now()
 	resultCh := make(chan RequestVoteReply, len(rf.peers))
 	for idx := range rf.peers {
 		if idx == rf.me {
@@ -94,7 +95,8 @@ func (rf *Raft) election() {
 				return
 			}
 		case <-deadline:
-			Debug(dInfo, "Server %d nothing happened during election for term %d. Waiting for new election\n", rf.me, currentTerm)
+			endTime := time.Now()
+			Debug(dInfo, "Server %d nothing happened during election for term %d after duration %v. Waiting for new election\n", rf.me, currentTerm, endTime.Sub(startTime))
 			return
 		}
 	}

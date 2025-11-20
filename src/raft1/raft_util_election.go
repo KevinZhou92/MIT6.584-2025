@@ -85,5 +85,5 @@ func (rf *Raft) becomeLeader(currentTerm int) {
 	rf.setElectionState(LEADER, currentTerm, rf.me)
 	rf.startLeaderProcesses()
 
-	Debug(dVote, "Server %d became candidate for term %d", rf.me, rf.electionState.CurrentTerm)
+	Debug(dVote, "Server %d became candidate for term %d", rf.me, currentTerm)
 }
