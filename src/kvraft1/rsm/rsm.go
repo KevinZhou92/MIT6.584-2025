@@ -90,7 +90,7 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 
 	// restore last applied index from raft and restore snapshot
 	if persister.SnapshotSize() > 0 {
-		rsm.lastAppliedIndex = GetLastAppliedIndex(persister)
+		rsm.lastAppliedIndex = GetLastAppliedIndex(persister, me)
 
 		snapshot := persister.ReadSnapshot()
 		rsm.sm.Restore(snapshot)
@@ -201,12 +201,16 @@ func (rsm *RSM) RunSnapShotProcess() {
 
 		// 2. Call Raft.Snapshot()
 		// log.Printf("RSM %d snapshotting at index %d with size %d with persist bytes %d\n", rsm.me, rsm.lastAppliedIndex, len(snapshot), rsm.Raft().PersistBytes())
+
 		rsm.Raft().Snapshot(rsm.lastAppliedIndex, snapshot)
+		// Sleep 50ms to allow KV server to apply some messages
+		time.Sleep(50 * time.Millisecond)
+
 		// log.Printf("RSM %d finished snapshotting, and new persist bytes is %d\n", rsm.me, newPersistBytes)
 	}
 }
 
-func GetLastAppliedIndex(persister *tester.Persister) int {
+func GetLastAppliedIndex(persister *tester.Persister, serverId int) int {
 	data := persister.ReadRaftState()
 
 	d := labgob.NewDecoder(bytes.NewBuffer(data))
@@ -216,7 +220,7 @@ func GetLastAppliedIndex(persister *tester.Persister) int {
 	d.Decode(&electionState)
 	d.Decode(&logs)
 	if d.Decode(&snapshotState) != nil {
-		log.Fatalf("%v couldn't decode snapshotState", me)
+		log.Fatalf("%v couldn't decode snapshotState", serverId)
 	}
 
 	return snapshotState.LastIncludedIndex

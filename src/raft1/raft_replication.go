@@ -156,7 +156,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		snapshotState := rf.getSnapshotState()
 		if rf.getLogSize() == 0 && rf.getMatchIndexForPeer(server) == snapshotState.LastIncludedIndex {
 			Debug(dLeader, "Server %d has 0 logs to replicate to peer %d, nextLogIndex: %d, snapshotState: %v [thread: %d]", rf.me, server, rf.getNextIndexForPeer(server), snapshotState, server)
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
