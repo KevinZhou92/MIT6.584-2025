@@ -80,7 +80,7 @@ def print_results(results: Dict[str, Dict[str, StatsMeter]], timing=False):
         if stats["completed"].n == 0:
             continue
         # color = "green" if stats["failed"].n == 0 else "red"
-        color = "red" if stats["failed"].n == 0 else "green"
+        color = "green" if stats["failed"].n == 0 else "red"
         row = [
             f"[{color}]{test}[/{color}]",
             str(stats["failed"].n),
