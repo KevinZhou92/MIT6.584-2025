@@ -1,10 +1,13 @@
 package rsm
 
 import (
+	"bytes"
+	"log"
 	"sync"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	raft "6.5840/raft1"
 	"6.5840/raftapi"
@@ -49,6 +52,10 @@ type RSM struct {
 	sm           StateMachine
 	// Your definitions here.
 	resChans map[int]chan Result
+
+	lastAppliedIndex int // index of last applied log entry
+	persister        *tester.Persister
+	snapshotCond     *sync.Cond
 }
 
 // servers[] contains the ports of the set of
@@ -73,14 +80,26 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
 		resChans:     make(map[int]chan Result), // initialize the map, index -> chan
+		persister:    persister,
 	}
+	rsm.snapshotCond = sync.NewCond(&rsm.mu)
+
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
 
-	go rsm.StartReaderProcess()
+	// restore last applied index from raft and restore snapshot
+	if persister.SnapshotSize() > 0 {
+		rsm.lastAppliedIndex = GetLastAppliedIndex(persister)
 
-	// fmt.Printf("RSM server %d started with %d servers\n", me, len(servers))
+		snapshot := persister.ReadSnapshot()
+		rsm.sm.Restore(snapshot)
+	}
+
+	go rsm.RunReaderProcess()
+	go rsm.RunSnapShotProcess()
+
+	// log.Printf("RSM server %d started with %d servers\n", me, len(servers))
 
 	return rsm
 }
@@ -101,7 +120,7 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	if !isLeader {
 		return rpc.ErrWrongLeader, nil
 	}
-	// fmt.Printf("RSM server %d: Submitting op %v\n", rsm.me, op)
+	// log.Printf("RSM server %d: Submitting op %v\n", rsm.me, op)
 
 	rsm.mu.Lock()
 	resChan := make(chan Result, 1)
@@ -117,38 +136,88 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 		rsm.mu.Unlock()
 	}()
 
-	// fmt.Println("RSM server ", rsm.me, " submitted op at index ", index)
+	// log.Println("RSM server ", rsm.me, " submitted op at index ", index)
 
 	select {
 	case res := <-resChan:
-		// fmt.Println("RSM server ", rsm.me, " finished op at index ", index)
+		// log.Println("RSM server ", rsm.me, " finished op at index ", index)
 		if res.Id != op.Id {
-			// fmt.Printf("Deleting res chan for op %v", op)
 			// Clean up recev chans as current server is not leader anymore
 			return rpc.ErrWrongLeader, nil
 		} else {
 			return rpc.OK, res.Req
 		}
 	case <-time.After(2000 * time.Millisecond):
-		// fmt.Printf("Timeout waiting for op %v", op)
+		// log.Printf("Timeout waiting for op %v", op)
 		return rpc.ErrWrongLeader, nil
 	}
 
 }
 
-func (rsm *RSM) StartReaderProcess() {
+func (rsm *RSM) RunReaderProcess() {
 	// RSM should exit if the raft instance is killed
 	for msg := range rsm.applyCh {
-		index := msg.CommandIndex
-
-		// fmt.Println(rsm.me)
-		// fmt.Println(msg)
-		res := rsm.sm.DoOp(msg.Command.(Op).Req)
-
 		rsm.mu.Lock()
+
+		// log.Println(rsm.me)
+		// log.Printf("### server %v applying msg %v\n", rsm.me, msg)
+		if !msg.CommandValid && msg.SnapshotValid {
+			// log.Printf("### server %v restoring snapshot\n", rsm.me)
+			rsm.sm.Restore(msg.Snapshot)
+			rsm.lastAppliedIndex = msg.SnapshotIndex
+			rsm.mu.Unlock()
+			// log.Printf("RSM server %d restored snapshot at index %d\n", rsm.me, msg.SnapshotIndex)
+			continue
+		}
+
+		res := rsm.sm.DoOp(msg.Command.(Op).Req)
+		index := msg.CommandIndex
+		rsm.lastAppliedIndex = index
+
+		if rsm.maxraftstate != -1 && rsm.Raft().PersistBytes() > rsm.maxraftstate {
+			// log.Printf("^^^ will signal snapshot process from RSM server %d with lastAppliedIndex %d", rsm.me, rsm.lastAppliedIndex)
+			rsm.snapshotCond.Signal() // WAKE UP SNAPSHOT PROCESS
+		}
+
 		if ch, ok := rsm.resChans[index]; ok {
 			ch <- Result{Id: msg.Command.(Op).Id, Req: res}
 		}
 		rsm.mu.Unlock()
 	}
+}
+
+// We should not snapshot too often, or Raft's performance will suffer.Here is an example,
+// If the lastAppliedIndex hasnt' changed since last snapshot, but our persist bytes(which include raft state and raft logs) is
+// over the threshold, in this case, if we snapshot again, the persist bytes won't be reduced, and we will be stuck in snapshotting forever loop.
+// So we only snapshot when lastAppliedIndex has advanced since last snapshot.
+func (rsm *RSM) RunSnapShotProcess() {
+	rsm.mu.Lock()
+	defer rsm.mu.Unlock()
+
+	for {
+		rsm.snapshotCond.Wait()
+
+		snapshot := rsm.sm.Snapshot()
+
+		// 2. Call Raft.Snapshot()
+		// log.Printf("RSM %d snapshotting at index %d with size %d with persist bytes %d\n", rsm.me, rsm.lastAppliedIndex, len(snapshot), rsm.Raft().PersistBytes())
+		rsm.Raft().Snapshot(rsm.lastAppliedIndex, snapshot)
+		// log.Printf("RSM %d finished snapshotting, and new persist bytes is %d\n", rsm.me, newPersistBytes)
+	}
+}
+
+func GetLastAppliedIndex(persister *tester.Persister) int {
+	data := persister.ReadRaftState()
+
+	d := labgob.NewDecoder(bytes.NewBuffer(data))
+	var electionState *raft.ElectionState
+	var logs []*raft.LogEntry
+	var snapshotState *raft.SnapshotState
+	d.Decode(&electionState)
+	d.Decode(&logs)
+	if d.Decode(&snapshotState) != nil {
+		log.Fatalf("%v couldn't decode snapshotState", me)
+	}
+
+	return snapshotState.LastIncludedIndex
 }

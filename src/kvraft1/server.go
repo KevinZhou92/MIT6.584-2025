@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -24,7 +25,8 @@ type KVServer struct {
 	mu   sync.Mutex
 
 	// Your definitions here.
-	store map[string]VersionedValue
+	store          map[string]VersionedValue
+	clientsLastSeq map[string]int64
 }
 
 // To type-cast req to the right type, take a look at Go's type switches or type
@@ -32,6 +34,8 @@ type KVServer struct {
 //
 // https://go.dev/tour/methods/16
 // https://go.dev/tour/methods/15
+// The Raft protocol guarantees that committed log entries will eventually be applied to the state machine in order,
+// but it does not guarantee that client retries will not lead to duplicate log entries entering the Raft Log
 func (kv *KVServer) DoOp(req any) any {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
@@ -55,9 +59,16 @@ func (kv *KVServer) DoOp(req any) any {
 	case rpc.PutArgs:
 		var reply rpc.PutReply
 
-		// log.Printf("put %v\n", req)
-		val, ok := kv.store[req.Key]
+		clientLastSeq, ok := kv.clientsLastSeq[req.ClientId]
+		if ok && req.SeqNum <= clientLastSeq {
+			// log.Printf("server %d received a duplicate request, will not execute it again\n", kv.me)
+			// This is a duplicate request, return OK without applying again
+			reply.Err = rpc.OK
+			return reply
+		}
 
+		val, ok := kv.store[req.Key]
+		// log.Printf("+++server %d put %v while current val is %v with putArgs: %v\n", kv.me, req, val, req)
 		if !ok && req.Version != 0 {
 			reply.Err = rpc.ErrVersion
 			return reply
@@ -75,6 +86,7 @@ func (kv *KVServer) DoOp(req any) any {
 		val.Version += 1
 		kv.store[req.Key] = val
 		reply.Err = rpc.OK
+		kv.clientsLastSeq[req.ClientId] = req.SeqNum
 
 		return reply
 	default:
@@ -84,12 +96,30 @@ func (kv *KVServer) DoOp(req any) any {
 }
 
 func (kv *KVServer) Snapshot() []byte {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	// Your code here
-	return nil
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.store)
+	e.Encode(kv.clientsLastSeq)
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	// Your code here
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&kv.store) != nil {
+		log.Fatalf("%v couldn't decode store", kv.me)
+	}
+	if d.Decode(&kv.clientsLastSeq) != nil {
+		log.Fatalf("%v couldn't decode clientsLastSeq", kv.me)
+	}
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -148,7 +178,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 	labgob.Register(rpc.GetArgs{})
 
 	store := make(map[string]VersionedValue)
-	kv := &KVServer{me: me, store: store}
+	clientsLastSeq := make(map[string]int64)
+	kv := &KVServer{me: me, store: store, clientsLastSeq: clientsLastSeq}
 
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
