@@ -102,6 +102,7 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) PersistBytes() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
 	return rf.persister.RaftStateSize()
 }
 
@@ -123,6 +124,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// we could retrieve an old term
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+
+	// If raft is killed, return false to indicate it is not the leader
+	if rf.killed() {
+		return -1, -1, false
+	}
 
 	term, isLeader := rf.electionState.CurrentTerm, rf.electionState.Role == LEADER
 
@@ -149,6 +155,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	Debug(dInfo, "Server %d has been killed", rf.me)
 	// Your code here, if desired.
 }
 
@@ -206,7 +213,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	Debug(dInfo, "Server %d started with electionState: %v, logs: %v, snapshotState: %v", rf.me, rf.electionState, rf.logs, rf.snapshotState)
 
 	rf.initializePeerIndexState()
-	Debug(dInfo, "Server %d started with PeerIndexState: %v", rf.me, rf.peerIndexState)
+	Debug(dInfo, "Server %d started with PeerIndexState: %v, log size %d", rf.me, rf.peerIndexState, len(rf.logs))
 
 	rf.applyCond = sync.NewCond(&rf.mu)
 

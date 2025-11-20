@@ -77,7 +77,7 @@ func (rf *Raft) runReplicaCounter() {
 			}
 		}
 
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -89,6 +89,8 @@ func (rf *Raft) runApplier() {
 		var snapshotMsg *raftapi.ApplyMsg
 		var entriesToApply []raftapi.ApplyMsg
 
+		var lastAppliedIdx int
+		var commitIdx int
 		rf.mu.Lock()
 		for rf.pendingSnapshotApplyMsg == nil && rf.logState.lastAppliedIndex >= rf.logState.commitIndex {
 			rf.applyCond.Wait()
@@ -121,6 +123,9 @@ func (rf *Raft) runApplier() {
 			}
 			entriesToApply = append(entriesToApply, applyMsg)
 			rf.logState.lastAppliedIndex = curIndex
+
+			lastAppliedIdx = rf.logState.lastAppliedIndex
+			commitIdx = rf.logState.commitIndex
 		}
 		rf.pendingSnapshotApplyMsg = nil
 		rf.mu.Unlock()
@@ -132,8 +137,9 @@ func (rf *Raft) runApplier() {
 		}
 
 		// Apply log entries (outside lock)
+		Debug(dCommit, "Server %d has %d applyMsgs to sent and lastAppliedIdx %d, commitIdx %d", rf.me, len(entriesToApply), lastAppliedIdx, commitIdx)
 		for _, msg := range entriesToApply {
-			Debug(dCommit, "Server %d sent applyMsg %s", rf.me, msg)
+			Debug(dCommit, "Server %d sent applyMsg %s and", rf.me, msg)
 			rf.sendApplyMsg(msg)
 		}
 		Debug(dCommit, "Server %d logState: %v", rf.me, rf.getLogState())
@@ -150,7 +156,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		snapshotState := rf.getSnapshotState()
 		if rf.getLogSize() == 0 && rf.getMatchIndexForPeer(server) == snapshotState.LastIncludedIndex {
 			Debug(dLeader, "Server %d has 0 logs to replicate to peer %d, nextLogIndex: %d, snapshotState: %v [thread: %d]", rf.me, server, rf.getNextIndexForPeer(server), snapshotState, server)
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 
@@ -185,7 +191,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		// Once a new leader is elected, the nextIndex is always initialized to log size.U
 		if nextIndex >= leaderLogSize {
 			Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
@@ -506,6 +512,7 @@ func (rf *Raft) hasSamePrevLog(realPrevLogIndex int, prevLogTermFromLeader int, 
 }
 
 func (rf *Raft) sendApplyMsg(applyMsg raftapi.ApplyMsg) {
+
 	if rf.killed() {
 		return
 	}
