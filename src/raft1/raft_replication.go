@@ -77,7 +77,7 @@ func (rf *Raft) runReplicaCounter() {
 			}
 		}
 
-		time.Sleep(2 * time.Millisecond)
+		// time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -156,7 +156,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		snapshotState := rf.getSnapshotState()
 		if rf.getLogSize() == 0 && rf.getMatchIndexForPeer(server) == snapshotState.LastIncludedIndex {
 			Debug(dLeader, "Server %d has 0 logs to replicate to peer %d, nextLogIndex: %d, snapshotState: %v [thread: %d]", rf.me, server, rf.getNextIndexForPeer(server), snapshotState, server)
-			time.Sleep(10 * time.Millisecond)
+			// time.Sleep(1 * time.Millisecond)
 			continue
 		}
 
@@ -191,7 +191,7 @@ func (rf *Raft) runLogReplicator(server int) {
 		// Once a new leader is elected, the nextIndex is always initialized to log size.U
 		if nextIndex >= leaderLogSize {
 			Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
-			time.Sleep(10 * time.Millisecond)
+			// time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
