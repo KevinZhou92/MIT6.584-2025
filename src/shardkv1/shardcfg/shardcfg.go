@@ -77,6 +77,10 @@ func (cfg *ShardConfig) Copy() *ShardConfig {
 }
 
 // mostgroup, mostn, leastgroup, leastn
+// mostgroup: GID of group with most number of assigned shards
+// mostn: number of assigned shards to mostgroup
+// leastgroup: GID of group with least number of assigned shards
+// leastn: number of assigned shards to leastgroup
 func analyze(c *ShardConfig) (tester.Tgid, int, tester.Tgid, int) {
 	counts := map[tester.Tgid]int{}
 	for _, g := range c.Shards {
