@@ -5,13 +5,18 @@ package shardctrler
 //
 
 import (
-
-	"6.5840/kvsrv1"
-	"6.5840/kvtest1"
+	kvsrv "6.5840/kvsrv1"
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
-	"6.5840/tester1"
+	"6.5840/shardkv1/shardgrp"
+	"6.5840/shardkv1/util"
+	tester "6.5840/tester1"
 )
 
+const (
+	SHARD_CONFIG_NAME string = "ShardConfig"
+)
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -45,6 +50,11 @@ func (sck *ShardCtrler) InitController() {
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
+	err := sck.IKVClerk.Put(SHARD_CONFIG_NAME, cfg.String(), rpc.Tversion(0))
+	if err != rpc.OK {
+		panic("InitConfig failed to put shard config in kv service")
+	}
+
 }
 
 // Called by the tester to ask the controller to change the
@@ -53,12 +63,37 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// Your code here.
-}
+	// Step 1: Find out changing shards
+	curShardConfig := sck.Query()
+	newShardConfig := new
 
+	movedShards := make([]shardcfg.Tshid, 0)
+	for shardId, groupId := range curShardConfig.Shards {
+		newGroupId := newShardConfig.Shards[shardId]
+		if groupId == newGroupId {
+			continue
+		}
+		movedShards = append(movedShards, shardcfg.Tshid(shardId))
+	}
+	util.Debug(util.Info, "###Changing shard config from %v to %v, moved shards %v", curShardConfig, newShardConfig, movedShards)
+
+	// Step 2: Freeze shard
+	for _, shardId := range movedShards {
+		groupId := curShardConfig.Shards[shardId]
+		groupClerk := shardgrp.MakeClerk(sck.clnt, curShardConfig.Groups[groupId])
+		groupClerk.FreezeShard(shardId, curShardConfig.Num)
+	}
+
+}
 
 // Return the current configuration
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
-	// Your code here.
-	return nil
-}
+	shardConfig, version, err := sck.IKVClerk.Get(SHARD_CONFIG_NAME)
+	if err != rpc.OK {
+		panic("Can't query shard config in kv service")
+	}
 
+	util.Debug(util.Info, "@@@Retrieved shard config %s with version %d", shardConfig, version)
+
+	return shardcfg.FromString(shardConfig)
+}
