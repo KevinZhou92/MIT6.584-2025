@@ -2,6 +2,8 @@ package shardgrp
 
 import (
 	"bytes"
+	"log"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -9,8 +11,8 @@ import (
 	"6.5840/kvsrv1/rpc"
 	"6.5840/labgob"
 	"6.5840/labrpc"
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp/shardrpc"
-	"6.5840/shardkv1/util"
 	tester "6.5840/tester1"
 )
 
@@ -20,30 +22,45 @@ type VersionedValue struct {
 }
 
 type KVServer struct {
-	me   int
-	dead int32 // set by Kill()
-	rsm  *rsm.RSM
-	gid  tester.Tgid
+	me         int
+	dead       int32 // set by Kill()
+	rsm        *rsm.RSM
+	gid        tester.Tgid
+	serverName string
 
 	// Your code here
 	mu sync.Mutex
 
-	store          map[string]VersionedValue
-	clientsLastSeq map[string]int64
-
-	shardLocked bool
+	shardStore      map[shardcfg.Tshid]map[string]VersionedValue // shardId -> key : value
+	shardLockStatus map[shardcfg.Tshid]bool
+	shardConfigNum  map[shardcfg.Tshid]shardcfg.Tnum
 }
 
 func (kv *KVServer) DoOp(req any) any {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+
 	switch req := req.(type) {
 	case rpc.GetArgs:
 		var reply rpc.GetReply
 
 		// log.Printf("get %v\n", req)
-		val, ok := kv.store[req.Key]
+		shardId := shardcfg.Key2Shard(req.Key)
+		keyStore, ok := kv.shardStore[shardId]
 
+		if !ok {
+			// log.Printf("[Shard Group] can't find shard group for key %v on server %v\n", req.Key, kv.serverName)
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		if kv.shardLockStatus[shardId] {
+			// log.Printf("[Shard Group]shard id %d, for key %v is locked on server %v\n", shardId, req.Key, kv.serverName)
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		val, ok := keyStore[req.Key]
 		if !ok {
 			reply.Err = rpc.ErrNoKey
 			return reply
@@ -64,9 +81,22 @@ func (kv *KVServer) DoOp(req any) any {
 		// 	reply.Err = rpc.OK
 		// 	return reply
 		// }
+		// log.Printf("put %v\n", req)
+		shardId := shardcfg.Key2Shard(req.Key)
+		keyStore, ok := kv.shardStore[shardId]
 
-		val, ok := kv.store[req.Key]
-		util.Debug(util.Info, "---server %d put %v while current val is %v with putArgs: %v\n", kv.me, req, val, req)
+		if !ok {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		if kv.shardLockStatus[shardId] {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		val, ok := keyStore[req.Key]
+		// log.Printf("[Shard Group]---server %d put %v while current val is %v with putArgs: %v\n", kv.me, req, val, req)
 		if !ok && req.Version != 0 {
 			reply.Err = rpc.ErrVersion
 			return reply
@@ -82,15 +112,114 @@ func (kv *KVServer) DoOp(req any) any {
 		}
 		val.Value = req.Value
 		val.Version += 1
-		kv.store[req.Key] = val
+		keyStore[req.Key] = val
 		reply.Err = rpc.OK
-		kv.clientsLastSeq[req.ClientId] = req.SeqNum
+
+		return reply
+	case shardrpc.FreezeShardArgs:
+		var reply shardrpc.FreezeShardReply
+
+		shardId, configNum := req.Shard, req.Num
+		if configNum <= shardcfg.Tnum(kv.shardConfigNum[shardId]) {
+			// log.Printf("[Shard Group - Freeze]server %v request config num %d, server config num %d for shardId %d\n", kv.serverName, configNum, kv.shardConfigNum[shardId], shardId)
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+		// log.Printf("[Shard Group - Freeze]freeze shards on server %v for shardId %v and new configNum %v\n", kv.serverName, shardId, configNum)
+		_, ok := kv.shardStore[shardId]
+
+		if !ok {
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		reply.State = kv.EncodeShardData(shardId)
+		kv.shardLockStatus[shardId] = true
+		reply.Err = rpc.OK
+		// log.Printf("[Shard Group - Freeze]encode shards %d on server %v\n", shardId, kv.serverName)
+
+		return reply
+	case shardrpc.InstallShardArgs:
+		var reply shardrpc.InstallShardReply
+
+		shardId, state, configNum := req.Shard, req.State, req.Num
+		// log.Printf("[Shard Group - Install] Server %v request config num %d, server config num %d for shardId %d\n", kv.serverName, configNum, kv.shardConfigNum[shardId], shardId)
+		if configNum < shardcfg.Tnum(kv.shardConfigNum[shardId]) {
+			// log.Printf("[Shard Group - Install] Can't install shardId %d on server %v request config num %d, server config num %d \n", shardId, kv.serverName, configNum, kv.shardConfigNum[shardId])
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+
+		if configNum == shardcfg.Tnum(kv.shardConfigNum[shardId]) {
+			// log.Printf("[Shard Group - Install] Already installed shardId %d on server %v request config num %d, server config num %d \n", shardId, kv.serverName, configNum, kv.shardConfigNum[shardId])
+			reply.Err = rpc.OK
+			return reply
+		}
+		_, ok := kv.shardStore[shardId]
+
+		if ok {
+			// log.Printf("[Shard Group - Install] Can't install on server %v request config num %d, server config num %d for shardId %d since shard exists\n", kv.serverName, configNum, kv.shardConfigNum[shardId], shardId)
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+		shardId, shardData := kv.DecodeShardData(state)
+		kv.shardStore[shardId] = shardData
+		kv.shardLockStatus[shardId] = false
+		kv.shardConfigNum[shardId] = configNum
+		reply.Err = rpc.OK
+
+		return reply
+	case shardrpc.DeleteShardArgs:
+		var reply shardrpc.DeleteShardReply
+
+		shardId, configNum := req.Shard, req.Num
+		// log.Printf("[Shard Group] Delete shard %d on server %v\n", shardId, kv.serverName)
+		if configNum <= shardcfg.Tnum(kv.shardConfigNum[shardId]) {
+			// log.Printf("[Shard Group] Cab't Delete shard %d on server %v due to config issue\n", shardId, kv.serverName)
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+		_, ok := kv.shardStore[shardId]
+
+		if !ok {
+			// log.Printf("[Shard Group] Can't delete shard %d on server %v\n", shardId, kv.serverName)
+			reply.Err = rpc.ErrWrongGroup
+			return reply
+		}
+		delete(kv.shardStore, shardId)
+		delete(kv.shardLockStatus, shardId)
+		delete(kv.shardConfigNum, shardId)
+		reply.Err = rpc.OK
 
 		return reply
 	default:
-		util.Debug(util.Fatal, "KVServer %d received unknown request type %T", kv.me, req)
+		log.Printf("KVServer %d received unknown request type %T", kv.me, req)
 		panic("unknown request type")
 	}
+}
+
+func (kv *KVServer) EncodeShardData(shardId shardcfg.Tshid) []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(shardId)
+	e.Encode(kv.shardStore[shardId])
+
+	return w.Bytes()
+}
+
+func (kv *KVServer) DecodeShardData(data []byte) (shardcfg.Tshid, map[string]VersionedValue) {
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var shardId shardcfg.Tshid
+	var shardData map[string]VersionedValue
+	if d.Decode(&shardId) != nil {
+		log.Printf("%v couldn't decode shardId", kv.me)
+	}
+	if d.Decode(&shardData) != nil {
+		log.Printf("%v couldn't decode shardData", kv.me)
+	}
+
+	return shardId, shardData
 }
 
 func (kv *KVServer) Snapshot() []byte {
@@ -100,8 +229,9 @@ func (kv *KVServer) Snapshot() []byte {
 	// Your code here
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	e.Encode(kv.store)
-	e.Encode(kv.clientsLastSeq)
+	e.Encode(kv.shardStore)
+	e.Encode(kv.shardConfigNum)
+	e.Encode(kv.shardLockStatus)
 	return w.Bytes()
 }
 
@@ -113,11 +243,14 @@ func (kv *KVServer) Restore(data []byte) {
 	// Your code here
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
-	if d.Decode(&kv.store) != nil {
-		util.Debug(util.Fatal, "%v couldn't decode store", kv.me)
+	if d.Decode(&kv.shardStore) != nil {
+		log.Printf("%v couldn't decode store", kv.me)
 	}
-	if d.Decode(&kv.clientsLastSeq) != nil {
-		util.Debug(util.Fatal, "%v couldn't decode clientsLastSeq", kv.me)
+	if d.Decode(&kv.shardConfigNum) != nil {
+		log.Printf("%v couldn't decode shardConfigNum", kv.me)
+	}
+	if d.Decode(&kv.shardLockStatus) != nil {
+		log.Printf("%v couldn't decode shardLockStatus", kv.me)
 	}
 }
 
@@ -149,21 +282,40 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 // shard) and return the key/values stored in that shard.
 func (kv *KVServer) FreezeShard(args *shardrpc.FreezeShardArgs, reply *shardrpc.FreezeShardReply) {
 	// Your code here
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	kv.shardLocked = true
-
+	err, res := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	// log.Printf("[Freeze]freeze shards on server %d with res %v\n", kv.me, res)
+	freezeShardReply := res.(shardrpc.FreezeShardReply)
+	reply.State = freezeShardReply.State
+	reply.Num = freezeShardReply.Num
+	reply.Err = freezeShardReply.Err
 }
 
 // Install the supplied state for the specified shard.
 func (kv *KVServer) InstallShard(args *shardrpc.InstallShardArgs, reply *shardrpc.InstallShardReply) {
 	// Your code here
+	err, res := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	installShardReply := res.(shardrpc.InstallShardReply)
+	reply.Err = installShardReply.Err
 }
 
 // Delete the specified shard.
 func (kv *KVServer) DeleteShard(args *shardrpc.DeleteShardArgs, reply *shardrpc.DeleteShardReply) {
 	// Your code here
+	err, res := kv.rsm.Submit(*args)
+	if err != rpc.OK {
+		reply.Err = err
+		return
+	}
+	deleteShardReply := res.(shardrpc.DeleteShardReply)
+	reply.Err = deleteShardReply.Err
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -198,9 +350,20 @@ func StartServerShardGrp(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, p
 	labgob.Register(shardrpc.DeleteShardArgs{})
 	labgob.Register(rsm.Op{})
 
-	store := make(map[string]VersionedValue)
-	clientsLastSeq := make(map[string]int64)
-	kv := &KVServer{gid: gid, me: me, store: store, clientsLastSeq: clientsLastSeq}
+	serverName := "server-" + strconv.Itoa(int(gid)) + "-" + strconv.Itoa(me)
+	store := make(map[shardcfg.Tshid]map[string]VersionedValue)
+	shardLockStatus := make(map[shardcfg.Tshid]bool)
+	shardConfigNum := make(map[shardcfg.Tshid]shardcfg.Tnum)
+
+	if gid == tester.Tgid(1) {
+		for shardId := range shardcfg.NShards {
+			store[shardcfg.Tshid(shardId)] = make(map[string]VersionedValue)
+			shardLockStatus[shardcfg.Tshid(shardId)] = false
+			shardConfigNum[shardcfg.Tshid(shardId)] = 1
+		}
+	}
+	// log.Printf("[ShardGroup Init]Initialize shard group %v with shardConfigNum %v and shardLockStatus %v on server %v\n", gid, shardConfigNum, shardLockStatus, serverName)
+	kv := &KVServer{gid: gid, me: me, shardStore: store, shardConfigNum: shardConfigNum, shardLockStatus: shardLockStatus, serverName: serverName}
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 
 	// Your code here

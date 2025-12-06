@@ -174,12 +174,12 @@ func (rsm *RSM) RunReaderProcess() {
 		index := msg.CommandIndex
 		rsm.lastAppliedIndex = index
 
-		if rsm.maxraftstate != -1 && rsm.Raft().PersistBytes() > 4*rsm.maxraftstate {
+		if rsm.maxraftstate != -1 && rsm.Raft().PersistBytes() > rsm.maxraftstate {
 			// log.Printf("^^^ will signal snapshot process from RSM server %d with lastAppliedIndex %d", rsm.me, rsm.lastAppliedIndex)
 			// rsm.snapshotCond.Signal() // WAKE UP SNAPSHOT PROCESS
 			snapshot := rsm.sm.Snapshot()
 			// 2. Call Raft.Snapshot()
-			// log.Printf("RSM %d snapshotting at index %d with size %d with persist bytes %d\n", rsm.me, rsm.lastAppliedIndex, len(snapshot), rsm.Raft().PersistBytes())
+			// log.Printf("[RSM]RSM %d snapshotting at index %d with size %d with persist bytes %d\n", rsm.me, rsm.lastAppliedIndex, len(snapshot), rsm.Raft().PersistBytes())
 
 			rsm.Raft().Snapshot(rsm.lastAppliedIndex, snapshot)
 		}

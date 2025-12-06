@@ -5,12 +5,14 @@ package shardctrler
 //
 
 import (
+	"log"
+	"sync"
+
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp"
-	"6.5840/shardkv1/util"
 	tester "6.5840/tester1"
 )
 
@@ -26,6 +28,7 @@ type ShardCtrler struct {
 	killed int32 // set by Kill()
 
 	// Your data here.
+	mu sync.Mutex
 }
 
 // Make a ShardCltler, which stores its state in a kvsrv.
@@ -50,8 +53,10 @@ func (sck *ShardCtrler) InitController() {
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
+	// log.Printf("[Shard Ctrl]Initialize shard controller with config %v\n", cfg)
 	err := sck.IKVClerk.Put(SHARD_CONFIG_NAME, cfg.String(), rpc.Tversion(0))
-	if err != rpc.OK {
+	if err != rpc.OK && err != rpc.ErrMaybe {
+		log.Printf("[Shard Ctrl] InitConfig failed to put shard config in kv service %v", err)
 		panic("InitConfig failed to put shard config in kv service")
 	}
 
@@ -63,9 +68,17 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// Your code here.
+	sck.mu.Lock()
+	defer sck.mu.Unlock()
+
 	// Step 1: Find out changing shards
+	shardData := make(map[shardcfg.Tshid][]byte)
 	curShardConfig := sck.Query()
 	newShardConfig := new
+
+	if newShardConfig.Num != curShardConfig.Num+1 {
+		panic("ChangeConfigTo called with invalid config num")
+	}
 
 	movedShards := make([]shardcfg.Tshid, 0)
 	for shardId, groupId := range curShardConfig.Shards {
@@ -75,14 +88,54 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 		movedShards = append(movedShards, shardcfg.Tshid(shardId))
 	}
-	util.Debug(util.Info, "###Changing shard config from %v to %v, moved shards %v", curShardConfig, newShardConfig, movedShards)
+	// log.Printf("[Shard Ctrl] Changing shard config from %v to %v, moved shards %v\n", curShardConfig, newShardConfig, movedShards)
 
 	// Step 2: Freeze shard
+	// log.Printf("[Shard Ctrl] Start freeze shards for shards %v\n", movedShards)
 	for _, shardId := range movedShards {
 		groupId := curShardConfig.Shards[shardId]
 		groupClerk := shardgrp.MakeClerk(sck.clnt, curShardConfig.Groups[groupId])
-		groupClerk.FreezeShard(shardId, curShardConfig.Num)
+
+		data, err := groupClerk.FreezeShard(shardId, newShardConfig.Num)
+
+		if err != rpc.OK {
+			log.Printf("[Shard Ctrl] Failed to freeze shard %d\n", shardId)
+		}
+		shardData[shardId] = data
 	}
+	// log.Printf("[Shard Ctrl] Finished freeze shards for shards %v\n", movedShards)
+
+	// Step 3: Install shard
+	// log.Printf("[Shard Ctrl] Start install shards for shards %v\n", movedShards)
+	for _, shardId := range movedShards {
+		groupId := newShardConfig.Shards[shardId]
+		groupClerk := shardgrp.MakeClerk(sck.clnt, newShardConfig.Groups[groupId])
+
+		err := groupClerk.InstallShard(shardId, shardData[shardId], newShardConfig.Num)
+		if err != rpc.OK {
+			log.Printf("[Shard Ctrl] Failed to install shard %d\n", shardId)
+		}
+	}
+	// log.Printf("[Shard Ctrl] Finished install shards for shards %v\n", movedShards)
+
+	// Step 4: Delete shard
+	// log.Printf("[Shard Ctrl] Start delete shards for shards %v\n", movedShards)
+	for _, shardId := range movedShards {
+		groupId := curShardConfig.Shards[shardId]
+		groupClerk := shardgrp.MakeClerk(sck.clnt, curShardConfig.Groups[groupId])
+		err := groupClerk.DeleteShard(shardId, newShardConfig.Num)
+
+		if err != rpc.OK {
+			// log.Printf("[Shard Ctrl] Failed to delete shard %d\n", shardId)
+		}
+	}
+	// log.Printf("[Shard Ctrl] Finished delete shards for shards %v\n", movedShards)
+	err := sck.IKVClerk.Put(SHARD_CONFIG_NAME, newShardConfig.String(), rpc.Tversion(curShardConfig.Num))
+	if err != rpc.OK && err != rpc.ErrMaybe {
+		// log.Panicf("[Shard Ctrl] ChangeConfigTo failed to update shard config due to err %v", err)
+		panic("[Shard Ctrl] Changeconfig failed to put shard config in kv service")
+	}
+	// log.Printf("[Shard Ctrl] Finished change config for shards %v\n", movedShards)
 
 }
 
@@ -90,10 +143,10 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	shardConfig, version, err := sck.IKVClerk.Get(SHARD_CONFIG_NAME)
 	if err != rpc.OK {
-		panic("Can't query shard config in kv service")
+		panic("[Shard Ctrl] Can't query shard config in kv service for version" + string(version))
 	}
 
-	util.Debug(util.Info, "@@@Retrieved shard config %s with version %d", shardConfig, version)
+	// log.Printf("@@@Retrieved shard config %s with version %d", shardConfig, version)
 
 	return shardcfg.FromString(shardConfig)
 }

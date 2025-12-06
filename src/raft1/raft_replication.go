@@ -77,7 +77,7 @@ func (rf *Raft) runReplicaCounter() {
 			}
 		}
 
-		// time.Sleep(2 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
@@ -155,13 +155,13 @@ func (rf *Raft) runLogReplicator(server int) {
 	for !rf.killed() {
 		snapshotState := rf.getSnapshotState()
 		if rf.getLogSize() == 0 && rf.getMatchIndexForPeer(server) == snapshotState.LastIncludedIndex {
-			Debug(dLeader, "Server %d has 0 logs to replicate to peer %d, nextLogIndex: %d, snapshotState: %v [thread: %d]", rf.me, server, rf.getNextIndexForPeer(server), snapshotState, server)
-			// time.Sleep(1 * time.Millisecond)
+			// Debug(dLeader, "Server %d has 0 logs to replicate to peer %d, nextLogIndex: %d, snapshotState: %v [thread: %d]", rf.me, server, rf.getNextIndexForPeer(server), snapshotState, server)
+			time.Sleep(1 * time.Millisecond)
 			continue
 		}
 
 		if rf.getLogSize() != 0 {
-			Debug(dLeader, "Server %d(term: %d, electionState: %s) has %d logs with lastLogTerm: %d [thread: %d]", rf.me, rf.getCurrentTerm(), rf.getElectionState(), rf.getLogSize(), rf.getLastLogTerm(), server)
+			// Debug(dLeader, "Server %d(term: %d, electionState: %s) has %d logs with lastLogTerm: %d [thread: %d]", rf.me, rf.getCurrentTerm(), rf.getElectionState(), rf.getLogSize(), rf.getLastLogTerm(), server)
 		}
 
 		currentTerm := rf.getCurrentTerm()
@@ -190,8 +190,8 @@ func (rf *Raft) runLogReplicator(server int) {
 		// We should still try to send log if nextIndex == log size, as there could be logs that are not replicated by a newly elected leader
 		// Once a new leader is elected, the nextIndex is always initialized to log size.U
 		if nextIndex >= leaderLogSize {
-			Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
-			// time.Sleep(10 * time.Millisecond)
+			// Debug(dLeader, "Server %d has no logs to replicate for server %d, nextIndex: %d", rf.me, server, nextIndex)
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
@@ -261,10 +261,11 @@ func (rf *Raft) handleUnsuccessfulAppend(leaderLogSize int, nextIndex int, serve
 	latestNextIndex := rf.peerIndexState.nextIndex[server]
 	if nextIndex != latestNextIndex && len(appendEntriesArgs.Entries) == 0 {
 		// Heartbeat request should take lower privilege on updating next index
-		Debug(dWarn, "Server %d should not change a new prevLogIndx %d to a oldPrevLogIndx %d for server %d", rf.me, latestNextIndex, nextIndex, server)
+		// Debug(dWarn, "Server %d should not change a new prevLogIndx %d to a oldPrevLogIndx %d for server %d", rf.me, latestNextIndex, nextIndex, server)
 		return
 	}
-	Debug(dWarn, "Server %d couldn't replicate log to server %d, response %v", rf.me, server, appendEntriesReply)
+
+	// Debug(dWarn, "Server %d couldn't replicate log to server %d, response %v", rf.me, server, appendEntriesReply)
 	if appendEntriesReply.ConflictEntryTerm != -1 {
 		conflictEntryIndex, conflictEntryTerm := appendEntriesReply.ConflictEntryIndex, appendEntriesReply.ConflictEntryTerm
 		curIdx := leaderLogSize - 1
