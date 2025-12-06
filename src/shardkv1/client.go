@@ -9,11 +9,12 @@ package shardkv
 //
 
 import (
+	"time"
+
 	"6.5840/kvsrv1/rpc"
 	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardctrler"
 	"6.5840/shardkv1/shardgrp"
-	"6.5840/shardkv1/util"
 	tester "6.5840/tester1"
 )
 
@@ -41,10 +42,25 @@ func MakeClerk(clnt *tester.Clnt, sck *shardctrler.ShardCtrler) kvtest.IKVClerk 
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	shardGroupClerk := shardgrp.GetShardGroupClerk(key, ck.sck.Query(), ck.clnt)
-	val, version, err := shardGroupClerk.Get(key)
+	var err rpc.Err
+	var val string
+	var version rpc.Tversion
 
-	util.Debug(util.Info, "===shardkv Clerk Get key %v returned val %v version %v err %v\n", key, val, version, err)
+	for {
+		shardGroupClerk := shardgrp.GetShardGroupClerk(key, ck.sck.Query(), ck.clnt)
+		val, version, err = shardGroupClerk.Get(key)
+
+		if err == rpc.OK || err == rpc.ErrNoKey {
+			// log.Printf("===shardkv Clerk Get key %v value %v version %v succeeded\n", key, val, version)
+			break
+		}
+
+		if err == rpc.ErrWrongGroup {
+			time.Sleep(5 * time.Millisecond)
+			// log.Printf("===shardkv Clerk Get key %v wrong group, retrying after sleep\n", key)
+			continue
+		}
+	}
 
 	return val, version, err
 }
@@ -52,10 +68,23 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	shardGroupClerk := shardgrp.GetShardGroupClerk(key, ck.sck.Query(), ck.clnt)
-	err := shardGroupClerk.Put(key, value, version)
+	var err rpc.Err
+	for {
+		shardGroupClerk := shardgrp.GetShardGroupClerk(key, ck.sck.Query(), ck.clnt)
+		err = shardGroupClerk.Put(key, value, version)
 
-	util.Debug(util.Info, "+++shardkv Clerk Put key %v value %v version %v returned err %v\n", key, value, version, err)
+		if err == rpc.OK || err == rpc.ErrMaybe || err == rpc.ErrVersion {
+			// log.Printf("+++shardkv Clerk Put key %v value %v version %v succeeded\n", key, value, version)
+			break
+		}
+
+		if err == rpc.ErrWrongGroup {
+			// log.Printf("+++shardkv Clerk Put key %v value %v version %v wrong group, retrying after sleep\n", key, value, version)
+			time.Sleep(5 * time.Millisecond)
+			continue
+		}
+		// log.Printf("+++shardkv Clerk Put key %v value %v version %v failed with err %v\n", key, value, version, err)
+	}
 
 	return err
 }
