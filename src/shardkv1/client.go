@@ -69,6 +69,7 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
 	var err rpc.Err
+	retry := 0
 	for {
 		shardGroupClerk := shardgrp.GetShardGroupClerk(key, ck.sck.Query(), ck.clnt)
 		err = shardGroupClerk.Put(key, value, version)
@@ -81,9 +82,21 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		if err == rpc.ErrWrongGroup {
 			// log.Printf("+++shardkv Clerk Put key %v value %v version %v wrong group, retrying after sleep\n", key, value, version)
 			time.Sleep(5 * time.Millisecond)
+			retry += 1
 			continue
 		}
 		// log.Printf("+++shardkv Clerk Put key %v value %v version %v failed with err %v\n", key, value, version, err)
+	}
+
+	// We need to check retry from the client side because the shardgroup might be using stale info
+	// and return ErrVersion even though the Put actually succeeded.
+	// Here an example scenario:
+	// 1. Client does a Put(key, value1, version 1) which succeeds but shard group client didn't receive the response. And the shard was moved to a new group.
+	// 2. Client retries the put which fails with ErrWrongGroup at shardgroup due to stale config.
+	// 3. Client queries new config and does Put(key, value1, version 1) to new group which failed and returns ErrVersion.
+	// In this case the Put actually succeeded in step 1 so we return ErrMaybe to the client.
+	if retry > 0 && err == rpc.ErrVersion {
+		err = rpc.ErrMaybe
 	}
 
 	return err

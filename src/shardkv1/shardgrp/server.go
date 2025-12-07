@@ -120,7 +120,7 @@ func (kv *KVServer) DoOp(req any) any {
 		var reply shardrpc.FreezeShardReply
 
 		shardId, configNum := req.Shard, req.Num
-		if configNum <= shardcfg.Tnum(kv.shardConfigNum[shardId]) {
+		if configNum < shardcfg.Tnum(kv.shardConfigNum[shardId]) {
 			// log.Printf("[Shard Group - Freeze]server %v request config num %d, server config num %d for shardId %d\n", kv.serverName, configNum, kv.shardConfigNum[shardId], shardId)
 			reply.Err = rpc.ErrWrongGroup
 			return reply

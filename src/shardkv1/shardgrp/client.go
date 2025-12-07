@@ -2,7 +2,6 @@ package shardgrp
 
 import (
 	"sync"
-	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
@@ -57,7 +56,6 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 		if reply.Err == rpc.ErrWrongLeader {
 			// log.Printf("[Shard Group Client] Get key %v encountered error %v", args.Key, reply.Err)
 			ck.leaderIdx = -1
-			time.Sleep(2 * time.Millisecond)
 			continue
 			// log.Printf("==clerk Get RPC to a non leader server %d failed\n", server)
 		}
@@ -105,7 +103,6 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		if reply.Err == rpc.ErrWrongLeader {
 			ck.leaderIdx = -1
 			// log.Printf("==clerk Put RPC %v to a non leader server %v failed\n", args, ck.servers[serverIdx])
-			time.Sleep(2 * time.Millisecond)
 			continue
 		}
 

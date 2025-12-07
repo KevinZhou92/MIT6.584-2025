@@ -17,7 +17,8 @@ import (
 )
 
 const (
-	SHARD_CONFIG_NAME string = "ShardConfig"
+	SHARD_CONFIG_NAME      string = "ShardConfig"
+	NEXT_SHARD_CONFIG_NAME string = "NextShardConfig"
 )
 
 // ShardCtrler for the controller and kv clerk.
@@ -37,6 +38,7 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 	srv := tester.ServerName(tester.GRP0, 0)
 	sck.IKVClerk = kvsrv.MakeClerk(clnt, srv)
 	// Your code here.
+
 	return sck
 }
 
@@ -44,6 +46,19 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	curConfig := sck.Query()
+
+	nextConfig, _, err := sck.IKVClerk.Get(NEXT_SHARD_CONFIG_NAME)
+	if err != rpc.OK && err != rpc.ErrMaybe {
+		panic("[Shard Ctrl] InitController failed to get next shard config in kv service")
+	}
+
+	newShardConfig := shardcfg.FromString(nextConfig)
+	if curConfig.Num == newShardConfig.Num {
+		// log.Println("[Shard Ctrl] InitController: current config matches next config, no recovery needed")
+		return
+	}
+	sck.ChangeConfigTo(newShardConfig)
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -53,13 +68,17 @@ func (sck *ShardCtrler) InitController() {
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
-	// log.Printf("[Shard Ctrl]Initialize shard controller with config %v\n", cfg)
+	// log.Printf("[Shard Ctrl] Initialize shard controller with config %v\n", cfg)
 	err := sck.IKVClerk.Put(SHARD_CONFIG_NAME, cfg.String(), rpc.Tversion(0))
 	if err != rpc.OK && err != rpc.ErrMaybe {
 		log.Printf("[Shard Ctrl] InitConfig failed to put shard config in kv service %v", err)
 		panic("InitConfig failed to put shard config in kv service")
 	}
-
+	err = sck.IKVClerk.Put(NEXT_SHARD_CONFIG_NAME, cfg.String(), rpc.Tversion(0))
+	if err != rpc.OK && err != rpc.ErrMaybe {
+		log.Printf("[Shard Ctrl] InitConfig failed to put next shard config in kv service %v", err)
+		panic("InitConfig failed to put next shard config in kv service")
+	}
 }
 
 // Called by the tester to ask the controller to change the
@@ -77,7 +96,14 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	newShardConfig := new
 
 	if newShardConfig.Num != curShardConfig.Num+1 {
-		panic("ChangeConfigTo called with invalid config num")
+		// log.Printf("ChangeConfigTo called with invalid config num %d, current config num %d\n", newShardConfig.Num, curShardConfig.Num)
+		return
+	}
+
+	err := sck.PutNextConfigIfNotPresent(newShardConfig, curShardConfig)
+	if err != rpc.OK && err != rpc.ErrMaybe {
+		// log.Println("[Shard Ctrl] There is already an ongoing config change")
+		return
 	}
 
 	movedShards := make([]shardcfg.Tshid, 0)
@@ -99,7 +125,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		data, err := groupClerk.FreezeShard(shardId, newShardConfig.Num)
 
 		if err != rpc.OK {
-			log.Printf("[Shard Ctrl] Failed to freeze shard %d\n", shardId)
+			// log.Printf("[Shard Ctrl] Failed to freeze shard %d\n", shardId)
 		}
 		shardData[shardId] = data
 	}
@@ -113,7 +139,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 
 		err := groupClerk.InstallShard(shardId, shardData[shardId], newShardConfig.Num)
 		if err != rpc.OK {
-			log.Printf("[Shard Ctrl] Failed to install shard %d\n", shardId)
+			// log.Printf("[Shard Ctrl] Failed to install shard %d\n", shardId)
 		}
 	}
 	// log.Printf("[Shard Ctrl] Finished install shards for shards %v\n", movedShards)
@@ -130,13 +156,12 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		}
 	}
 	// log.Printf("[Shard Ctrl] Finished delete shards for shards %v\n", movedShards)
-	err := sck.IKVClerk.Put(SHARD_CONFIG_NAME, newShardConfig.String(), rpc.Tversion(curShardConfig.Num))
+	err = sck.IKVClerk.Put(SHARD_CONFIG_NAME, newShardConfig.String(), rpc.Tversion(curShardConfig.Num))
 	if err != rpc.OK && err != rpc.ErrMaybe {
-		// log.Panicf("[Shard Ctrl] ChangeConfigTo failed to update shard config due to err %v", err)
-		panic("[Shard Ctrl] Changeconfig failed to put shard config in kv service")
+		// log.Printf("[Shard Ctrl] ChangeConfigTo failed to update shard config from %v to newShardConfig %v with num %d due to err %v\n", curShardConfig, newShardConfig, curShardConfig.Num, err)
+		// panic("[Shard Ctrl] ChangeConfigTo failed to update shard config in kv service")
 	}
 	// log.Printf("[Shard Ctrl] Finished change config for shards %v\n", movedShards)
-
 }
 
 // Return the current configuration
@@ -149,4 +174,32 @@ func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	// log.Printf("@@@Retrieved shard config %s with version %d", shardConfig, version)
 
 	return shardcfg.FromString(shardConfig)
+}
+
+func (sck *ShardCtrler) QueryNextConfig() *shardcfg.ShardConfig {
+	shardConfig, version, err := sck.IKVClerk.Get(NEXT_SHARD_CONFIG_NAME)
+	if err != rpc.OK {
+		panic("[Shard Ctrl] Can't query next shard config in kv service for version" + string(version))
+	}
+
+	// log.Printf("@@@Retrieved shard config %s with version %d", shardConfig, version)
+
+	return shardcfg.FromString(shardConfig)
+}
+
+func (sck *ShardCtrler) PutNextConfigIfNotPresent(newShardConfig *shardcfg.ShardConfig, curShardConfig *shardcfg.ShardConfig) rpc.Err {
+	nextConfig := sck.QueryNextConfig()
+
+	if nextConfig.Num == newShardConfig.Num && nextConfig.String() != newShardConfig.String() {
+		return rpc.ErrVersion
+	}
+
+	if nextConfig.Num == curShardConfig.Num+1 && nextConfig.String() == newShardConfig.String() {
+		return rpc.OK
+	}
+	// Store the next config in kvsrv since the current next config is the same as the current config
+	err := sck.IKVClerk.Put(NEXT_SHARD_CONFIG_NAME, newShardConfig.String(), rpc.Tversion(curShardConfig.Num))
+
+	return err
+
 }
