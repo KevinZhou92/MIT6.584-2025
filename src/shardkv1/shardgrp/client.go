@@ -2,6 +2,7 @@ package shardgrp
 
 import (
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
 	"6.5840/shardkv1/shardcfg"
@@ -50,12 +51,14 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 				break
 			}
 			restransmit += 1
+			time.Sleep(2 * time.Millisecond)
 			continue
 		}
 
 		if reply.Err == rpc.ErrWrongLeader {
 			// log.Printf("[Shard Group Client] Get key %v encountered error %v", args.Key, reply.Err)
 			ck.leaderIdx = -1
+			time.Sleep(2 * time.Millisecond)
 			continue
 			// log.Printf("==clerk Get RPC to a non leader server %d failed\n", server)
 		}
@@ -97,11 +100,13 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 				break
 			}
 			restransmit += 1
+			time.Sleep(2 * time.Millisecond)
 			continue
 		}
 
 		if reply.Err == rpc.ErrWrongLeader {
 			ck.leaderIdx = -1
+			time.Sleep(2 * time.Millisecond)
 			// log.Printf("==clerk Put RPC %v to a non leader server %v failed\n", args, ck.servers[serverIdx])
 			continue
 		}
@@ -144,11 +149,13 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 		ok := ck.clnt.Call(ck.servers[serverIdx], "KVServer.FreezeShard", &args, &reply)
 		if !ok {
 			// log.Printf("==clerk FreezeShard RPC to server %d failed\n", serverIdx)
+			time.Sleep(2 * time.Millisecond)
 			continue
 		}
 
 		if reply.Err == rpc.ErrWrongLeader {
 			ck.leaderIdx = -1
+			time.Sleep(2 * time.Millisecond)
 			// log.Printf("==clerk FreezeShard RPC %v to a non leader server %d failed\n", args, serverIdx)
 			continue
 		}
@@ -183,11 +190,13 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 		if !ok {
 			// log.Printf("==clerk Put RPC to server %d failed\n", serverIdx)
 			restransmit = true
+			time.Sleep(2 * time.Millisecond)
 			continue
 		}
 
 		if reply.Err == rpc.ErrWrongLeader {
 			ck.leaderIdx = -1
+			time.Sleep(2 * time.Millisecond)
 			// log.Printf("==clerk Put RPC %v to a non leader server %d failed\n", args, serverIdx)
 			continue
 		}
@@ -229,12 +238,14 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 
 		ok := ck.clnt.Call(ck.servers[serverIdx], "KVServer.DeleteShard", &args, &reply)
 		if !ok {
+			time.Sleep(2 * time.Millisecond)
 			// log.Printf("==clerk DeleteShard RPC to server %d failed\n", serverIdx)
 			continue
 		}
 
 		if reply.Err == rpc.ErrWrongLeader {
 			ck.leaderIdx = -1
+			time.Sleep(2 * time.Millisecond)
 			// log.Printf("==clerk DeleteShard RPC %v to a non leader server %d failed\n", args, serverIdx)
 			continue
 		}

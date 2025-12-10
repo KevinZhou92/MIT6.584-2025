@@ -94,6 +94,7 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	shardData := make(map[shardcfg.Tshid][]byte)
 	curShardConfig := sck.Query()
 	newShardConfig := new
+	installedShard := make(map[shardcfg.Tshid]bool)
 
 	if newShardConfig.Num != curShardConfig.Num+1 {
 		// log.Printf("ChangeConfigTo called with invalid config num %d, current config num %d\n", newShardConfig.Num, curShardConfig.Num)
@@ -123,8 +124,8 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		groupClerk := shardgrp.MakeClerk(sck.clnt, curShardConfig.Groups[groupId])
 
 		data, err := groupClerk.FreezeShard(shardId, newShardConfig.Num)
-
 		if err != rpc.OK {
+			continue
 			// log.Printf("[Shard Ctrl] Failed to freeze shard %d\n", shardId)
 		}
 		shardData[shardId] = data
@@ -139,8 +140,10 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 
 		err := groupClerk.InstallShard(shardId, shardData[shardId], newShardConfig.Num)
 		if err != rpc.OK {
+			continue
 			// log.Printf("[Shard Ctrl] Failed to install shard %d\n", shardId)
 		}
+		installedShard[shardId] = true
 	}
 	// log.Printf("[Shard Ctrl] Finished install shards for shards %v\n", movedShards)
 
@@ -149,8 +152,13 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	for _, shardId := range movedShards {
 		groupId := curShardConfig.Shards[shardId]
 		groupClerk := shardgrp.MakeClerk(sck.clnt, curShardConfig.Groups[groupId])
-		err := groupClerk.DeleteShard(shardId, newShardConfig.Num)
 
+		if !installedShard[shardId] {
+			// log.Printf("[Shard Ctrl] Shard %d not installed at new group, skip delete\n", shardId)
+			continue
+		}
+
+		err := groupClerk.DeleteShard(shardId, newShardConfig.Num)
 		if err != rpc.OK {
 			// log.Printf("[Shard Ctrl] Failed to delete shard %d\n", shardId)
 		}
